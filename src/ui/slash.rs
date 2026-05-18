@@ -17,6 +17,7 @@ use crate::session::{MessageRole, Session};
 use crate::ui::events::{format_time, render_session};
 use crate::ui::input::InputEditor;
 use crate::ui::renderer::Renderer;
+use crate::ui::view::{ViewId, ViewManager};
 
 const C_AGENT: Color = Color::White;
 const C_RESULT: Color = Color::DarkGrey;
@@ -139,6 +140,7 @@ pub async fn handle_slash(
     todo_tools_enabled: &mut bool,
     #[cfg(feature = "loop")] loop_state: &mut Option<crate::extras::r#loop::LoopState>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
+    view_manager: &mut ViewManager,
 ) -> anyhow::Result<()> {
     let permission = &ctx.permission;
     let parts: SmallVec<[&str; 3]> = text.trim().splitn(3, ' ').collect();
@@ -790,6 +792,8 @@ pub async fn handle_slash(
                     C_RESULT,
                 );
             }
+            renderer.write_line("  /view [name]           list views or switch to a named view", C_RESULT)?;
+            renderer.write_line("  /view default          return to the main view", C_RESULT)?;
             renderer.write_line("  /quit                  exit zerostack", C_RESULT)?;
             renderer.write_line("  /help                  show this message", C_RESULT)?;
             renderer.write_line("", C_AGENT)?;
@@ -811,6 +815,42 @@ pub async fn handle_slash(
             renderer.write_line("  Ctrl+R                 toggle reasoning", C_RESULT)?;
             renderer.write_line("  Ctrl+C / Ctrl+D        interrupt/quit", C_RESULT)?;
             renderer.write_line("  mouse scroll           scroll chat", C_RESULT)?;
+        }
+        "/view" => {
+            let target = parts.get(1).copied().unwrap_or("").trim();
+            if target.is_empty() {
+                // List available views.
+                let names: Vec<String> = view_manager.named_views().map(|id| id.as_str().to_string()).collect();
+                if names.is_empty() {
+                    renderer.write_line("no named views registered", C_AGENT)?;
+                } else {
+                    renderer.write_line("available views:", C_AGENT)?;
+                    for name in &names {
+                        let active_marker = if view_manager.active_named().map(|id| id.as_str()) == Some(name.as_str()) {
+                            " *"
+                        } else {
+                            ""
+                        };
+                        renderer.write_line(&format!("  {}{}", name, active_marker), C_RESULT)?;
+                    }
+                }
+            } else if target == "default" {
+                // Switch back to the lead (main) view.
+                if view_manager.is_lead() {
+                    renderer.write_line("already in main view", C_AGENT)?;
+                } else {
+                    view_manager.switch_to_lead(renderer)?;
+                    renderer.write_line("(returned to main view)", C_AGENT)?;
+                }
+            } else {
+                let id = ViewId::new(target);
+                if !view_manager.has_view(&id) {
+                    renderer.write_line(&format!("no view named '{}' (use /view to list available views)", target), C_ERROR)?;
+                } else {
+                    view_manager.switch_to(id.clone(), renderer)?;
+                    renderer.write_line(&format!("(viewing '{}')", target), C_AGENT)?;
+                }
+            }
         }
         _ => {
             renderer.write_line(

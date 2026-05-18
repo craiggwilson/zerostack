@@ -428,6 +428,41 @@ impl Renderer {
         Ok(())
     }
 
+    /// Take the current buffer, flushing any partial line first.
+    ///
+    /// Used for view hot-swap: call this to extract the lead buffer before
+    /// switching to another view. The renderer's buffer is left empty
+    /// after this call.
+    ///
+    /// # INVARIANT
+    ///
+    /// This method (and `restore_buffer`) are called exclusively from the
+    /// UI event loop. No concurrent access — no lock needed.
+    pub fn take_buffer(&mut self) -> Vec<LineEntry> {
+        self.commit_partial();
+        let buf = std::mem::take(&mut self.buffer);
+        self.lines = 0;
+        self.col = 0;
+        self.scroll_offset = 0;
+        buf
+    }
+
+    /// Restore a previously taken buffer and re-render the viewport.
+    ///
+    /// Used for view hot-swap: call this to switch the renderer back to a
+    /// previously saved buffer (lead or named view).
+    ///
+    /// # INVARIANT
+    ///
+    /// See `take_buffer` — called exclusively from the UI event loop.
+    pub fn restore_buffer(&mut self, buf: Vec<LineEntry>) -> io::Result<()> {
+        self.buffer = buf;
+        self.lines = self.buffer.len() as u16;
+        self.col = 0;
+        self.scroll_offset = 0;
+        self.render_viewport()
+    }
+
     pub fn clear_content(&mut self) -> io::Result<()> {
         self.buffer.clear();
         self.partial.clear();
