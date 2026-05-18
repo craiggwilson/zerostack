@@ -169,6 +169,8 @@ async fn main() -> anyhow::Result<()> {
 
     let completion_model = client.completion_model(model.to_string());
 
+    #[cfg(feature = "subagent")]
+    let subagent_registry = extras::subagent::registry::SubagentRegistry::new();
     if cli.print {
         let agent = provider::build_agent(
             completion_model,
@@ -249,6 +251,8 @@ async fn main() -> anyhow::Result<()> {
             sandbox,
             #[cfg(feature = "mcp")]
             mcp_manager.as_ref(),
+            #[cfg(feature = "subagent")]
+            subagent_registry,
         )
         .await?;
     }

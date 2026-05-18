@@ -23,6 +23,9 @@ impl StatusLine {
         loop_label: Option<&str>,
         prompt_name: Option<&str>,
         perm_mode: Option<&str>,
+        // When viewing a subagent, pass `Some("name | status")` to show a view badge.
+        // Pass `None` for the normal lead view.
+        view_name: Option<&str>,
     ) -> String {
         let state = if is_running { "running" } else { "ready" };
         let dir = Path::new(&session.working_dir)
@@ -61,8 +64,15 @@ impl StatusLine {
             _ => String::new(),
         };
 
+        // When viewing a subagent, prepend the view badge before the directory.
+        let view_prefix = match view_name {
+            Some(name) => format!("[view: {}] ", name),
+            None => String::new(),
+        };
+
         format!(
-            "{}{} | {}{} | {}/{} ({}%) | {}msgs | {}{}{}{}",
+            "{}{}{} | {}{} | {}/{} ({}%) | {}msgs | {}{}{}{}",
+            view_prefix,
             dir,
             cost_str,
             session.model,

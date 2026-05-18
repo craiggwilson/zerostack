@@ -2,11 +2,14 @@ mod events;
 pub(crate) mod input;
 mod markdown;
 pub(crate) mod picker;
-mod renderer;
+pub(crate) mod renderer;
 mod slash;
 mod status;
 mod terminal;
 pub mod view;
+
+#[cfg(feature = "subagent")]
+use std::collections::VecDeque;
 
 use compact_str::CompactString;
 use crossterm::event;
@@ -20,6 +23,12 @@ use crate::context::ContextFiles;
 use crate::event::{AgentEvent, UserEvent};
 #[cfg(feature = "mcp")]
 use crate::extras::mcp::McpClientManager;
+#[cfg(feature = "subagent")]
+use crate::extras::subagent::{
+    SubagentId, SubagentStatus,
+    bus::{BusEvent, create_bus},
+    registry::SubagentRegistry,
+};
 use crate::permission::ask::{AskReceiver, AskSender, UserDecision};
 use crate::permission::checker::PermCheck;
 use crate::provider::{AnyAgent, AnyClient};
@@ -27,11 +36,20 @@ use crate::sandbox::Sandbox;
 use crate::session::{MessageRole, PermissionAllowEntry, Session};
 use crate::ui::events::{render_session, sanitize_output};
 use crate::ui::input::InputEditor;
+#[cfg(feature = "subagent")]
+use crate::ui::renderer::LineEntry;
 use crate::ui::renderer::{Renderer, copy_to_clipboard};
 use crate::ui::slash::{handle_compress, handle_slash};
-use crate::ui::view::ViewManager;
 use crate::ui::status::StatusLine;
 use crate::ui::terminal::TerminalGuard;
+#[cfg(feature = "subagent")]
+use crate::ui::view::ViewId;
+use crate::ui::view::ViewManager;
+
+/// Maximum number of pending lead-injection messages.
+/// When exceeded, the oldest is dropped with a warning.
+#[cfg(feature = "subagent")]
+const MAX_PENDING_INJECTIONS: usize = 100;
 
 const C_AGENT: Color = Color::White;
 const C_ERROR: Color = Color::Red;
@@ -111,6 +129,7 @@ pub async fn run_interactive(
     mut ask_rx: Option<AskReceiver>,
     sandbox: Sandbox,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
+    #[cfg(feature = "subagent")] subagent_registry: SubagentRegistry,
 ) -> anyhow::Result<()> {
     let _guard = TerminalGuard::new()?;
 
@@ -134,6 +153,31 @@ pub async fn run_interactive(
     #[cfg(feature = "git-worktree")]
     let mut wt_return_path: Option<String> = None;
 
+    // Subagent state (feature-gated).
+    // INVARIANT: All view_buffer writes happen in this UI event loop.
+    // The relay task only sends BusEvents to the bus channel — it never
+    // background tokens are written to view_manager's inactive buffers. No locks needed.
+    #[cfg(feature = "subagent")]
+    let subagent_registry = SubagentRegistry::new();
+    #[cfg(feature = "subagent")]
+    let (bus_tx, bus_rx_inner) = create_bus();
+    // Keep one sender clone alive so the bus channel never closes while the
+    // UI loop is running, even when no subagents are active.
+    #[cfg(feature = "subagent")]
+    let _bus_tx_keep = bus_tx.clone();
+    #[cfg(feature = "subagent")]
+    let mut bus_rx_opt: Option<crate::extras::subagent::bus::BusReceiver> = Some(bus_rx_inner);
+    #[cfg(not(feature = "subagent"))]
+    let mut bus_rx_opt: Option<tokio::sync::mpsc::Receiver<()>> = None;
+    // Per-subagent view buffers, keyed by SubagentId.
+    // Sole owner: this UI event loop. No locks.
+    #[cfg(feature = "subagent")]
+    // View switching state.
+    #[cfg(feature = "subagent")]
+    // Pending lead-injection queue: messages from subagents waiting for the
+    // lead to become idle. Capped at MAX_PENDING_INJECTIONS.
+    #[cfg(feature = "subagent")]
+    let mut pending_injections: VecDeque<(SubagentId, String)> = VecDeque::new();
     let perm_mode = || -> Option<String> {
         permission.as_ref().map(|p| {
             p.lock()
@@ -154,6 +198,7 @@ pub async fn run_interactive(
             None,
             context.current_prompt_name.as_deref(),
             perm_mode().as_deref(),
+            None,
         ),
         false,
     )?;
@@ -179,19 +224,19 @@ pub async fn run_interactive(
                             break;
                         }
                     }
-                    MouseEventKind::Down(btn) if btn == MouseButton::Left => {
+                    MouseEventKind::Down(MouseButton::Left) => {
                         let _ = user_tx_clone.blocking_send(UserEvent::MouseDown {
                             row: m.row,
                             col: m.column,
                         });
                     }
-                    MouseEventKind::Drag(btn) if btn == MouseButton::Left => {
+                    MouseEventKind::Drag(MouseButton::Left) => {
                         let _ = user_tx_clone.blocking_send(UserEvent::MouseDrag {
                             row: m.row,
                             col: m.column,
                         });
                     }
-                    MouseEventKind::Up(btn) if btn == MouseButton::Left => {
+                    MouseEventKind::Up(MouseButton::Left) => {
                         let _ = user_tx_clone.blocking_send(UserEvent::MouseUp {
                             row: m.row,
                             col: m.column,
@@ -216,7 +261,7 @@ pub async fn run_interactive(
                         renderer.draw_bottom(
                             &input.buffer,
                             input.cursor,
-                            &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                            &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                             is_running,
                         )?;
                         continue;
@@ -227,7 +272,7 @@ pub async fn run_interactive(
                         renderer.draw_bottom(
                             &input.buffer,
                             input.cursor,
-                            &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                            &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                             is_running,
                         )?;
                         continue;
@@ -241,7 +286,7 @@ pub async fn run_interactive(
                                 renderer.render_viewport()?;
                                 renderer.draw_bottom(
                                     &input.buffer, input.cursor,
-                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                                     is_running,
                                 )?;
                             }
@@ -254,7 +299,7 @@ pub async fn run_interactive(
                                 renderer.render_viewport()?;
                                 renderer.draw_bottom(
                                     &input.buffer, input.cursor,
-                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                                     is_running,
                                 )?;
                             }
@@ -272,7 +317,7 @@ pub async fn run_interactive(
                             renderer.render_viewport()?;
                             renderer.draw_bottom(
                                 &input.buffer, input.cursor,
-                                &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                                &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                                 is_running,
                             )?;
                         }
@@ -296,7 +341,7 @@ pub async fn run_interactive(
                                 renderer.draw_bottom(
                                     &input.buffer,
                                     input.cursor,
-                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                                     is_running,
                                 )?;
                             } else {
@@ -314,7 +359,7 @@ pub async fn run_interactive(
                             renderer.render_viewport()?;
                             renderer.draw_bottom(
                                 &input.buffer, input.cursor,
-                                &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                                &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                                 is_running,
                             )?;
                             continue;
@@ -324,7 +369,7 @@ pub async fn run_interactive(
                             renderer.render_viewport()?;
                             renderer.draw_bottom(
                                 &input.buffer, input.cursor,
-                                &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                                &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                                 is_running,
                             )?;
                             continue;
@@ -341,7 +386,7 @@ pub async fn run_interactive(
                             renderer.draw_bottom(
                                 &input.buffer,
                                 input.cursor,
-                                &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                                &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                                 is_running,
                             )?;
                             continue;
@@ -354,7 +399,7 @@ pub async fn run_interactive(
                                 renderer.draw_bottom(
                                     &input.buffer,
                                     input.cursor,
-                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                                     is_running,
                                 )?;
                                 continue;
@@ -365,7 +410,7 @@ pub async fn run_interactive(
                                 renderer.draw_bottom(
                                     &input.buffer,
                                     input.cursor,
-                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                                     is_running,
                                 )?;
                                 continue;
@@ -376,7 +421,7 @@ pub async fn run_interactive(
                                 renderer.draw_bottom(
                                     &input.buffer,
                                     input.cursor,
-                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                                     is_running,
                                 )?;
                                 continue;
@@ -386,7 +431,7 @@ pub async fn run_interactive(
                                 renderer.draw_bottom(
                                     &input.buffer,
                                     input.cursor,
-                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                                     is_running,
                                 )?;
                                 continue;
@@ -399,7 +444,7 @@ pub async fn run_interactive(
                                 renderer.render_viewport()?;
                                 renderer.draw_bottom(
                                     &input.buffer, input.cursor,
-                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                                     is_running,
                                 )?;
                                 if let Some(ref picker) = input.picker {
@@ -415,7 +460,7 @@ pub async fn run_interactive(
                                 renderer.draw_bottom(
                                     &input.buffer,
                                     input.cursor,
-                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                                     is_running,
                                 )?;
                                 continue;
@@ -429,7 +474,7 @@ pub async fn run_interactive(
                                     renderer.write_line(&format!("> {}", safe_line), Color::Green)?;
                                 }
                                 renderer.write_line("", Color::White)?;
-                                let result = handle_slash(&text, &mut agent, &client, &mut renderer, session, cli, cfg, context, &mut show_reasoning, &mut is_running, &mut input, &permission, &ask_tx, &mut todo_tools_enabled, &sandbox, #[cfg(feature = "loop")] &mut loop_state, #[cfg(feature = "mcp")] mcp_manager, &mut view_manager).await;
+                                let result = handle_slash(&text, &mut agent, &client, &mut renderer, session, cli, cfg, context, &mut show_reasoning, &mut is_running, &mut input, &permission, &ask_tx, &mut todo_tools_enabled, &sandbox, #[cfg(feature = "loop")] &mut loop_state, #[cfg(feature = "mcp")] mcp_manager, &mut view_manager, #[cfg(feature = "subagent")] &subagent_registry, #[cfg(feature = "subagent")] &bus_tx).await;
                                 match result {
                                 Err(e) if e.to_string().starts_with("DEFER_COMPRESS:") => {
                                     let err_msg = e.to_string();
@@ -558,7 +603,7 @@ pub async fn run_interactive(
                         renderer.draw_bottom(
                             &input.buffer,
                             input.cursor,
-                            &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                            &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                             is_running,
                         )?;
                         if let Some(ref picker) = input.picker {
@@ -714,6 +759,19 @@ pub async fn run_interactive(
                         is_running = false;
                         agent_rx = None;
 
+                        // Drain one pending injection from subagent messages.
+                        // INVARIANT: exactly one message injected per lead Done event.
+                        #[cfg(feature = "subagent")]
+                        if let Some((inj_id, inj_content)) = pending_injections.pop_front() {
+                            let inj_name = subagent_registry.name(inj_id).unwrap_or_else(|| inj_id.to_string());
+                            let prefixed = format!("[{}]: {}", inj_name, inj_content);
+                            let history = crate::agent::runner::convert_history(session);
+                            let runner = agent.clone().spawn_runner(prefixed.clone(), history);
+                            agent_rx = Some(runner.event_rx);
+                            is_running = true;
+                            session.add_message(MessageRole::User, &prefixed);
+                        }
+
                         #[cfg(feature = "loop")]
                         if let Some(ref mut ls) = loop_state
                             && ls.active
@@ -790,13 +848,200 @@ pub async fn run_interactive(
                 renderer.draw_bottom(
                     &input.buffer,
                     input.cursor,
-                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                     is_running,
                 )?;
                 if let Some(ref picker) = input.picker {
                     picker.draw()?;
                 }
             }
+            // Bus event arm: aggregates events from all running subagents.
+            // Uses the same Option<Receiver> pattern as agent_rx:
+            // when bus_rx_opt is None (feature disabled), this arm stays pending.
+            Some(_bus_ev) = async {
+                if let Some(rx) = &mut bus_rx_opt {
+                    rx.recv().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+            #[cfg(feature = "subagent")]
+            {
+                let bus_ev = _bus_ev;
+                let ev_id = bus_ev.subagent_id();
+                // SAFETY: Discard events for unknown SubagentIds.
+                // These can arrive after stop() due to MPSC channel buffering
+                // between relay task abort() and the task actually exiting.
+                if !subagent_registry.contains_id(ev_id) {
+                    tracing::debug!("discarding stale BusEvent for unknown subagent {}", ev_id);
+                    // continue without redrawing
+                } else {
+                    let agent_name = subagent_registry.name(ev_id).unwrap_or_else(|| ev_id.to_string());
+                    let view_id = ViewId::new(&agent_name);
+                    let is_active_view = view_manager.active_named().map(|id| id.as_str()) == Some(agent_name.as_str());
+
+                    match bus_ev {
+                        BusEvent::Token { text, .. } => {
+                            let safe = sanitize_output(&text);
+                            let entry = LineEntry { text: safe.as_str().into(), color: C_AGENT };
+                            if is_active_view {
+                                renderer.write(&safe, C_AGENT)?;
+                            } else {
+                                view_manager.write_to_inactive(&view_id, vec![entry]);
+                            }
+                        }
+                        BusEvent::ToolCall { name, args, .. } => {
+                            let line = format!("[{}] ◈ {}", agent_name, format_tool_call_summary(&name, &args));
+                            let safe = sanitize_output(&line);
+                            let entry = LineEntry { text: safe.as_str().into(), color: C_TOOL };
+                            if is_active_view {
+                                renderer.write_line(&safe, C_TOOL)?;
+                            } else {
+                                view_manager.write_to_inactive(&view_id, vec![entry]);
+                            }
+                        }
+                        BusEvent::ToolResult { output, .. } => {
+                            let show_details = cfg.show_tool_details.unwrap_or(false);
+                            if show_details {
+                                let safe = sanitize_output(&output);
+                                let preview: String = safe.chars().take(120).collect();
+                                let line = format!("[{}] ◈ result: {}", agent_name, preview);
+                                let entry = LineEntry { text: line.as_str().into(), color: Color::DarkGrey };
+                                if is_active_view {
+                                    renderer.write_line(&line, Color::DarkGrey)?;
+                                } else {
+                                    view_manager.write_to_inactive(&view_id, vec![entry]);
+                                }
+                            }
+                        }
+                        BusEvent::Done { id, response, tokens, cost } => {
+                            subagent_registry.set_status(id, SubagentStatus::Done);
+                            subagent_registry.set_final_response(id, response.to_string());
+                            let summary: String = response.chars().take(100).collect();
+                            let cost_str = if cost > 0.0 { format!(" ${:.4}", cost) } else { String::new() };
+                            let line = format!("[{} done] {}tok{}: {}", agent_name, tokens, cost_str, summary);
+                            let safe = sanitize_output(&line);
+                            let entry = LineEntry { text: safe.as_str().into(), color: C_AGENT };
+                            // Always render Done in lead view; also append to subagent view buffer.
+                            if view_manager.is_lead() {
+                                renderer.write_line(&safe, C_AGENT)?;
+                            }
+                            view_manager.write_to_inactive(&view_id, vec![entry]);
+
+                            // Inbox drain re-spawn (task 3.5):
+                            // If a message is queued, re-spawn the runner for this subagent.
+                            // Sequence: abort-first (old relay), then spawn new runner + relays.
+                            //
+                            // PERMISSION NOTE: The cloned agent's internal ask_tx is permanently
+                            // bound to the original ask_rx (consumed at spawn and now dead).
+                            // The new perm relay below uses a fresh (ask_tx2, ask_rx2) pair,
+                            // but the agent sends permission requests to the dead original channel.
+                            // Re-spawned inbox-drain runs therefore have no permission ask support —
+                            // permission-gated tool calls will fail closed with "Permission system
+                            // unavailable" (src/agent/tools/mod.rs). Accepted MVP limitation.
+                            if let Some(next_msg) = subagent_registry.pop_inbox_message(id)
+                                && let Some(subagent) = subagent_registry.get_agent(id)
+                            {
+                                let runner = subagent.spawn_runner(next_msg, vec![]);
+                                // Fresh ask channel for perm relay — agent sends to dead channel (see above).
+                                let (_ask_tx2, ask_rx2): (AskSender, crate::permission::ask::AskReceiver) =
+                                    tokio::sync::mpsc::channel(32);
+                                let new_relay = crate::extras::subagent::bus::spawn_agent_relay(
+                                    id, runner.event_rx, bus_tx.clone(),
+                                );
+                                let new_perm_relay = crate::extras::subagent::bus::spawn_perm_relay(
+                                    id, ask_rx2, bus_tx.clone(),
+                                );
+                                // replace_relay_handles aborts old relays before storing new ones.
+                                if let Err(e) = subagent_registry.replace_relay_handles(id, new_relay, new_perm_relay) {
+                                    tracing::error!("inbox drain relay replacement failed: {}", e);
+                                } else {
+                                    subagent_registry.set_status(id, SubagentStatus::Running);
+                                    tracing::debug!("subagent {} re-spawned for inbox drain", id);
+                                }
+                            }
+                        }
+                        BusEvent::Error { id, message } => {
+                            subagent_registry.set_status(id, SubagentStatus::Error(message.to_string()));
+                            let line = format!("[{} error]: {}", agent_name, message);
+                            let safe = sanitize_output(&line);
+                            let entry = LineEntry { text: safe.as_str().into(), color: C_ERROR };
+                            if view_manager.is_lead() {
+                                renderer.write_line(&safe, C_ERROR)?;
+                            }
+                            view_manager.write_to_inactive(&view_id, vec![entry]);
+                        }
+                        BusEvent::PermAsk { id: _, request } => {
+                            // Route subagent permission ask through existing ask UI.
+                            let prompt_line = format!("[{} permission] {}: {}", agent_name, request.tool, request.input);
+                            renderer.write_line(&sanitize_output(&prompt_line), C_PERM)?;
+                            renderer.write_line("  (y) allow once  (a) allow always  (n) deny  (ESC) abort", C_PERM)?;
+                            let decision = loop {
+                                tokio::select! {
+                                    Some(ev) = user_rx.recv() => {
+                                        if let UserEvent::Key(key) = ev {
+                                            match key.code {
+                                                KeyCode::Char('y') => break UserDecision::AllowOnce,
+                                                KeyCode::Char('a') => {
+                                                    let pattern = suggest_pattern(&request.tool, &request.input);
+                                                    renderer.write_line(&format!("  -> will allow: {}", pattern), Color::Green)?;
+                                                    break UserDecision::AllowAlways(pattern);
+                                                }
+                                                KeyCode::Char('n') | KeyCode::Esc => break UserDecision::Deny,
+                                                _ => {}
+                                            }
+                                        }
+                                    }
+                                }
+                            };
+                            let _ = request.reply.send(decision);
+                        }
+                        BusEvent::Message { from_id: _, from_name, to, content } => {
+                            match to {
+                                crate::extras::subagent::MessageTarget::Lead => {
+                                    // Render the message in lead view.
+                                    let line = format!("[{} \u{2192} you]: {}", from_name, content);
+                                    renderer.write_line(&sanitize_output(&line), C_AGENT)?;
+                                    // Inject into lead or queue if busy.
+                                    if agent_rx.is_none() {
+                                        // Lead is idle — start new turn immediately.
+                                        let history = crate::agent::runner::convert_history(session);
+                                        let prefixed = format!("[{}]: {}", from_name, content);
+                                        let runner = agent.clone().spawn_runner(prefixed.clone(), history);
+                                        agent_rx = Some(runner.event_rx);
+                                        is_running = true;
+                                        session.add_message(MessageRole::User, &prefixed);
+                                    } else {
+                                        // Lead is busy — queue with cap enforcement.
+                                        if pending_injections.len() >= MAX_PENDING_INJECTIONS {
+                                            pending_injections.pop_front();
+                                            renderer.write_line("[warn] pending message queue full, dropping oldest message", Color::Yellow)?;
+                                        }
+                                        pending_injections.push_back((ev_id, content.to_string()));
+                                    }
+                                }
+                                crate::extras::subagent::MessageTarget::Subagent(target_id) => {
+                                    let target_name = subagent_registry.name(target_id).unwrap_or_else(|| target_id.to_string());
+                                    let line = format!("[{} \u{2192} {}]: {}", from_name, target_name, content);
+                                    renderer.write_line(&sanitize_output(&line), C_AGENT)?;
+                                    let _ = subagent_registry.send_message(target_id, content.to_string());
+                                }
+                                crate::extras::subagent::MessageTarget::Broadcast => {
+                                    let line = format!("[{} broadcast]: {}", from_name, content);
+                                    renderer.write_line(&sanitize_output(&line), C_AGENT)?;
+                                }
+                            }
+                        }
+                    }
+                    renderer.draw_bottom(
+                        &input.buffer,
+                        input.cursor,
+                        &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
+                        is_running,
+                    )?;
+                }
+            } // close #[cfg(feature = "subagent")] block
+            } // close select! arm body
             Some(ask_req) = async {
                 if let Some(rx) = &mut ask_rx {
                     rx.recv().await
@@ -865,7 +1110,7 @@ pub async fn run_interactive(
                 renderer.draw_bottom(
                     &input.buffer,
                     input.cursor,
-                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                     is_running,
                 )?;
                 if let Some(ref picker) = input.picker {
@@ -876,7 +1121,7 @@ pub async fn run_interactive(
                 renderer.draw_bottom(
                     &input.buffer,
                     input.cursor,
-                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref()),
+                    &StatusLine::render(session, is_running, 0, loop_label.as_deref(), context.current_prompt_name.as_deref(), perm_mode().as_deref(), view_manager.status_label().as_deref()),
                     is_running,
                 )?;
                 if let Some(ref picker) = input.picker {

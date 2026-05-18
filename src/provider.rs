@@ -416,6 +416,79 @@ pub fn create_client(
     }
 }
 
+/// Pure mechanical dispatch: match AnyModel and call build_agent_inner for each variant.
+///
+/// This is the single place where AnyModel → AnyAgent dispatch occurs.
+/// Callers supply all varying parameters (tool_set) explicitly;
+/// this function contains no behavioral logic or defaults.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_agent_from_model(
+    model: AnyModel,
+    cli: &Cli,
+    cfg: &Config,
+    context: &ContextFiles,
+    permission: Option<PermCheck>,
+    ask_tx: Option<AskSender>,
+    sandbox: Sandbox,
+    tool_set: &ToolSet,
+    #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
+) -> AnyAgent {
+    match model {
+        AnyModel::OpenRouter(m) => AnyAgent::OpenRouter(
+            builder::build_agent_inner(
+                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), tool_set,
+                #[cfg(feature = "mcp")]
+                mcp_manager,
+            )
+            .await,
+        ),
+        AnyModel::OpenAI(m) => AnyAgent::OpenAI(
+            builder::build_agent_inner(
+                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), tool_set,
+                #[cfg(feature = "mcp")]
+                mcp_manager,
+            )
+            .await,
+        ),
+        AnyModel::Anthropic(m) => AnyAgent::Anthropic(
+            builder::build_agent_inner(
+                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), tool_set,
+                #[cfg(feature = "mcp")]
+                mcp_manager,
+            )
+            .await,
+        ),
+        AnyModel::Gemini(m) => AnyAgent::Gemini(
+            builder::build_agent_inner(
+                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), tool_set,
+                #[cfg(feature = "mcp")]
+                mcp_manager,
+            )
+            .await,
+        ),
+        AnyModel::Ollama(m) => AnyAgent::Ollama(
+            builder::build_agent_inner(
+                m, cli, cfg, context, permission, ask_tx, sandbox, tool_set,
+                #[cfg(feature = "mcp")]
+                mcp_manager,
+            )
+            .await,
+        ),
+        AnyModel::Custom(m) => AnyAgent::Custom(
+            builder::build_agent_inner(
+                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), tool_set,
+                #[cfg(feature = "mcp")]
+                mcp_manager,
+            )
+            .await,
+        ),
+    }
+}
+
+/// Build an agent with the default tool set (all tools enabled).
+///
+/// This is the entry point for building the lead agent. Subagents use
+/// `build_agent_from_model` directly with a custom `ToolSet`.
 pub async fn build_agent(
     model: AnyModel,
     cli: &Cli,
@@ -427,55 +500,10 @@ pub async fn build_agent(
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
 ) -> AnyAgent {
     let tool_set = ToolSet::default();
-
-    match model {
-        AnyModel::OpenRouter(m) => AnyAgent::OpenRouter(
-            builder::build_agent_inner(
-                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), &tool_set,
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-            )
-            .await,
-        ),
-        AnyModel::OpenAI(m) => AnyAgent::OpenAI(
-            builder::build_agent_inner(
-                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), &tool_set,
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-            )
-            .await,
-        ),
-        AnyModel::Anthropic(m) => AnyAgent::Anthropic(
-            builder::build_agent_inner(
-                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), &tool_set,
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-            )
-            .await,
-        ),
-        AnyModel::Gemini(m) => AnyAgent::Gemini(
-            builder::build_agent_inner(
-                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), &tool_set,
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-            )
-            .await,
-        ),
-        AnyModel::Ollama(m) => AnyAgent::Ollama(
-            builder::build_agent_inner(
-                m, cli, cfg, context, permission, ask_tx, sandbox, &tool_set,
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-            )
-            .await,
-        ),
-        AnyModel::Custom(m) => AnyAgent::Custom(
-            builder::build_agent_inner(
-                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), &tool_set,
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-            )
-            .await,
-        ),
-    }
+    build_agent_from_model(
+        model, cli, cfg, context, permission, ask_tx, sandbox, &tool_set,
+        #[cfg(feature = "mcp")]
+        mcp_manager,
+    )
+    .await
 }
