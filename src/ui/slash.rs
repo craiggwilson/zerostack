@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use compact_str::CompactString;
 use crossterm::style::Color;
 use smallvec::SmallVec;
@@ -15,6 +17,11 @@ use crate::extras::subagent::{
     registry::{SpawnConfig, SubagentRegistry},
 };
 
+#[cfg(feature = "teams")]
+use crate::extras::teams::{
+    TeamContext,
+    task_board::{Priority, TaskId},
+};
 use crate::permission::SecurityMode;
 use crate::permission::ask::AskSender;
 use crate::permission::checker::PermCheck;
@@ -68,6 +75,7 @@ pub async fn handle_compress(
     ask_tx: &Option<AskSender>,
     sandbox: &Sandbox,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
+    #[cfg(feature = "teams")] team_context: &TeamContext,
 ) -> anyhow::Result<()> {
     renderer.write_line("compressing...", C_AGENT)?;
     renderer.write_line("", Color::White)?;
@@ -126,6 +134,8 @@ pub async fn handle_compress(
         sandbox.clone(),
         #[cfg(feature = "mcp")]
         mcp_manager,
+        #[cfg(feature = "teams")]
+        Some(team_context),
     )
     .await;
     renderer.write_line("prompt cleared (back to default behavior)", C_AGENT)?;
@@ -162,8 +172,9 @@ pub async fn handle_slash(
     #[cfg(feature = "loop")] loop_state: &mut Option<crate::extras::r#loop::LoopState>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
     view_manager: &mut ViewManager,
-    #[cfg(feature = "subagent")] subagent_registry: &SubagentRegistry,
+    #[cfg(feature = "subagent")] subagent_registry: &Arc<SubagentRegistry>,
     #[cfg(feature = "subagent")] bus_tx: &crate::extras::subagent::bus::BusSender,
+    #[cfg(feature = "teams")] team_context: &TeamContext,
 ) -> anyhow::Result<()> {
     let parts: SmallVec<[&str; 3]> = text.trim().splitn(3, ' ').collect();
     match parts[0] {
@@ -183,6 +194,8 @@ pub async fn handle_slash(
                     sandbox.clone(),
                     #[cfg(feature = "mcp")]
                     mcp_manager,
+                    #[cfg(feature = "teams")]
+                    Some(team_context),
                 )
                 .await;
                 session.model = new_model.clone();
@@ -496,6 +509,8 @@ pub async fn handle_slash(
                         sandbox.clone(),
                         #[cfg(feature = "mcp")]
                         mcp_manager,
+                        #[cfg(feature = "teams")]
+                        Some(team_context),
                     )
                     .await;
                     renderer.write_line(
@@ -601,6 +616,8 @@ pub async fn handle_slash(
                         sandbox.clone(),
                         #[cfg(feature = "mcp")]
                         mcp_manager,
+                        #[cfg(feature = "teams")]
+                        Some(team_context),
                     )
                     .await;
                 }
@@ -620,6 +637,8 @@ pub async fn handle_slash(
                         sandbox.clone(),
                         #[cfg(feature = "mcp")]
                         mcp_manager,
+                        #[cfg(feature = "teams")]
+                        Some(team_context),
                     )
                     .await;
                     renderer.write_line(&format!("active prompt: {}", name), C_AGENT)?;
@@ -666,6 +685,9 @@ pub async fn handle_slash(
                         sandbox.clone(),
                         #[cfg(feature = "mcp")]
                         mcp_manager,
+                        // Team state is in-memory and persists across worktrees.
+                        #[cfg(feature = "teams")]
+                        Some(team_context),
                     )
                     .await;
                     render_session(renderer, session, cli, cfg, context)?;
@@ -885,8 +907,34 @@ pub async fn handle_slash(
                 let _ = renderer
                     .write_line("  /agent stop <name>             stop a subagent", C_RESULT);
             }
-            renderer.write_line("  /quit                  exit zerostack", C_RESULT)?;
-            renderer.write_line("  /help                  show this message", C_RESULT)?;
+
+            #[cfg(feature = "teams")]
+            {
+                let _ = renderer.write_line("", C_AGENT);
+                let _ = renderer.write_line("team commands:", C_AGENT);
+                let _ =
+                    renderer.write_line("  /team create <name>            create a team", C_RESULT);
+                let _ = renderer.write_line(
+                    "  /team spawn <name> [flags] <prompt>  spawn team member",
+                    C_RESULT,
+                );
+                let _ = renderer.write_line(
+                    "  /team msg <team> <message>      send to all team members",
+                    C_RESULT,
+                );
+                let _ = renderer.write_line(
+                    "  /team tasks [add|done]         manage task board",
+                    C_RESULT,
+                );
+                let _ = renderer.write_line(
+                    "  /team status                   show team overview",
+                    C_RESULT,
+                );
+                let _ = renderer.write_line(
+                    "  /team disband                  stop all members and clear team",
+                    C_RESULT,
+                );
+            }
             renderer.write_line("", C_AGENT)?;
             renderer.write_line("keys:", C_AGENT)?;
             renderer.write_line("  PgUp/PgDn             scroll chat history", C_RESULT)?;
@@ -1027,6 +1075,9 @@ pub async fn handle_slash(
                             bus_tx.clone(),
                             #[cfg(feature = "mcp")]
                             mcp_manager,
+                            // Standalone subagents don't receive team communication tools.
+                            #[cfg(feature = "teams")]
+                            None,
                         )
                         .await
                     {
@@ -1127,6 +1178,374 @@ pub async fn handle_slash(
             }
         }
 
+        #[cfg(feature = "teams")]
+        "/team" => {
+            if parts.len() < 2 {
+                renderer.write_line(
+                    "usage: /team <create|list|spawn|msg|tasks|status|disband> [team] ...",
+                    C_ERROR,
+                )?;
+                return Ok(());
+            }
+            match parts[1] {
+                "create" => {
+                    let name = parts.get(2).copied().unwrap_or("").trim();
+                    if name.is_empty() {
+                        renderer.write_line("usage: /team create <name>", C_ERROR)?;
+                        return Ok(());
+                    }
+                    match team_context.teams.create(name.to_string()) {
+                        Ok(_) => {
+                            renderer.write_line(&format!("team '{}' created", name), C_AGENT)?
+                        }
+                        Err(e) => renderer.write_line(&format!("error: {}", e), C_ERROR)?,
+                    }
+                }
+                "list" => {
+                    let names = team_context.teams.list();
+                    if names.is_empty() {
+                        renderer.write_line("no teams", C_AGENT)?;
+                    } else {
+                        renderer.write_line(
+                            &format!("{} team(s): {}", names.len(), names.join(", ")),
+                            C_AGENT,
+                        )?;
+                    }
+                }
+                "spawn" => {
+                    // usage: /team spawn <team> <agent-name> [--fork] [--readonly] <prompt>
+                    let mut args: Vec<&str> = parts.get(2..).unwrap_or(&[]).to_vec();
+                    if args.len() < 2 {
+                        renderer.write_line(
+                            "usage: /team spawn <team> <agent-name> [--fork] [--readonly] <prompt>",
+                            C_ERROR,
+                        )?;
+                        return Ok(());
+                    }
+                    let team_name = args.remove(0).to_string();
+                    let agent_name = args.remove(0).to_string();
+
+                    let team_arc = match team_context.teams.get(&team_name) {
+                        Some(arc) => arc,
+                        None => {
+                            renderer.write_line(
+                                &format!("team '{}' not found (use /team create first)", team_name),
+                                C_ERROR,
+                            )?;
+                            return Ok(());
+                        }
+                    };
+
+                    let mut context_mode = ContextMode::Fresh;
+                    let mut tool_preset = ToolPreset::All;
+                    let mut prompt_parts: Vec<&str> = Vec::new();
+                    let mut i = 0;
+                    while i < args.len() {
+                        match args[i] {
+                            "--fork" => {
+                                context_mode = ContextMode::Fork;
+                                i += 1;
+                            }
+                            "--readonly" => {
+                                tool_preset = ToolPreset::ReadOnly;
+                                i += 1;
+                            }
+                            other => {
+                                prompt_parts.push(other);
+                                i += 1;
+                            }
+                        }
+                    }
+                    if prompt_parts.is_empty() {
+                        renderer.write_line("spawn requires a prompt", C_ERROR)?;
+                        return Ok(());
+                    }
+
+                    let existing_member_names: Vec<String> = {
+                        let guard = team_arc.read().unwrap_or_else(|e| e.into_inner());
+                        guard
+                            .members()
+                            .iter()
+                            .filter_map(|&mid| subagent_registry.name(mid))
+                            .collect()
+                    };
+                    let all_member_names = {
+                        let mut names = existing_member_names;
+                        names.push(agent_name.clone());
+                        names
+                    };
+                    let team_prefix = format!(
+                        "[Team: {}. Members: {}]\n\n",
+                        team_name,
+                        all_member_names.join(", ")
+                    );
+                    let prompt = format!("{}{}", team_prefix, prompt_parts.join(" "));
+                    let config = SpawnConfig {
+                        name: agent_name.clone(),
+                        prompt,
+                        context_mode,
+                        tool_set: ToolSet {
+                            preset: tool_preset,
+                            overrides: std::collections::HashMap::new(),
+                        },
+                        model_name: session.model.to_string(),
+                    };
+                    match subagent_registry
+                        .spawn(
+                            config,
+                            client,
+                            cli,
+                            cfg,
+                            context,
+                            Some(session as &Session),
+                            permission.clone(),
+                            sandbox.clone(),
+                            bus_tx.clone(),
+                            #[cfg(feature = "mcp")]
+                            mcp_manager,
+                            // Team members receive team communication tools.
+                            #[cfg(feature = "teams")]
+                            Some(team_context),
+                        )
+                        .await
+                    {
+                        Ok(id) => {
+                            view_manager.write_to_inactive(
+                                &crate::ui::view::ViewId::new(&agent_name),
+                                Vec::new(),
+                            );
+                            {
+                                let mut guard = team_arc.write().unwrap_or_else(|e| e.into_inner());
+                                guard.add_member(id);
+                            }
+                            renderer.write_line(
+                                &format!(
+                                    "spawned '{}' into team '{}' (id={})",
+                                    agent_name, team_name, id
+                                ),
+                                C_AGENT,
+                            )?;
+                        }
+                        Err(e) => renderer.write_line(&format!("spawn failed: {}", e), C_ERROR)?,
+                    }
+                }
+                "msg" => {
+                    // usage: /team msg <team> <message>
+                    let team_name = parts.get(2).copied().unwrap_or("").trim();
+                    let message = parts.get(3..).unwrap_or(&[]).join(" ");
+                    if team_name.is_empty() || message.is_empty() {
+                        renderer.write_line("usage: /team msg <team> <message>", C_ERROR)?;
+                        return Ok(());
+                    }
+                    match team_context.teams.get(team_name) {
+                        None => renderer
+                            .write_line(&format!("team '{}' not found", team_name), C_ERROR)?,
+                        Some(arc) => {
+                            let member_ids: Vec<_> = {
+                                let guard = arc.read().unwrap_or_else(|e| e.into_inner());
+                                guard.members().to_vec()
+                            };
+                            let mut delivered = 0usize;
+                            for id in &member_ids {
+                                if subagent_registry.send_message(*id, message.clone()).is_ok() {
+                                    delivered += 1;
+                                }
+                            }
+                            renderer.write_line(
+                                &format!(
+                                    "message sent to {} member(s) of team '{}'",
+                                    delivered, team_name
+                                ),
+                                C_AGENT,
+                            )?;
+                        }
+                    }
+                }
+
+                "tasks" => {
+                    // usage: /team tasks <team> [add <content> [priority] | done <id> | list]
+                    let team_name = parts.get(2).copied().unwrap_or("").trim();
+                    if team_name.is_empty() {
+                        renderer
+                            .write_line("usage: /team tasks <team> [add|done|list]", C_ERROR)?;
+                        return Ok(());
+                    }
+                    let team_arc = match team_context.teams.get(team_name) {
+                        Some(arc) => arc,
+                        None => {
+                            renderer
+                                .write_line(&format!("team '{}' not found", team_name), C_ERROR)?;
+                            return Ok(());
+                        }
+                    };
+                    let subcommand = parts.get(3).copied().unwrap_or("").trim();
+                    match subcommand {
+                        "add" => {
+                            let rest = parts.get(4..).unwrap_or(&[]).join(" ");
+                            let rest = rest.trim();
+                            let mut words = rest.rsplitn(2, ' ');
+                            let maybe_priority = words.next().unwrap_or("");
+                            let (content, priority) = match maybe_priority {
+                                "high" => (
+                                    words.next().unwrap_or("").trim().to_string(),
+                                    Priority::High,
+                                ),
+                                "medium" => (
+                                    words.next().unwrap_or("").trim().to_string(),
+                                    Priority::Medium,
+                                ),
+                                "low" => {
+                                    (words.next().unwrap_or("").trim().to_string(), Priority::Low)
+                                }
+                                _ => (rest.to_string(), Priority::Medium),
+                            };
+                            if content.is_empty() {
+                                renderer.write_line(
+                                    "usage: /team tasks <team> add <content> [high|medium|low]",
+                                    C_ERROR,
+                                )?;
+                            } else {
+                                let id = {
+                                    let mut guard =
+                                        team_arc.write().unwrap_or_else(|e| e.into_inner());
+                                    guard.add_task(content, priority, Vec::new())
+                                };
+                                renderer.write_line(
+                                    &format!("task {} added to team '{}'", id, team_name),
+                                    C_AGENT,
+                                )?;
+                            }
+                        }
+                        "done" => {
+                            let id_str = parts.get(4).copied().unwrap_or("").trim();
+                            match id_str.parse::<u32>() {
+                                Ok(n) => {
+                                    let result = {
+                                        let mut guard =
+                                            team_arc.write().unwrap_or_else(|e| e.into_inner());
+                                        guard.mark_task_done(TaskId(n))
+                                    };
+                                    match result {
+                                        Ok(()) => renderer.write_line(
+                                            &format!("task {} marked done", n),
+                                            C_AGENT,
+                                        )?,
+                                        Err(e) => renderer
+                                            .write_line(&format!("error: {}", e), C_ERROR)?,
+                                    }
+                                }
+                                Err(_) => renderer
+                                    .write_line("usage: /team tasks <team> done <id>", C_ERROR)?,
+                            }
+                        }
+                        _ => {
+                            let (tasks, summary) = {
+                                let guard = team_arc.read().unwrap_or_else(|e| e.into_inner());
+                                let tasks: Vec<_> = guard
+                                    .list_tasks()
+                                    .into_iter()
+                                    .map(|t| {
+                                        (
+                                            t.id,
+                                            t.content.clone(),
+                                            t.status.to_string(),
+                                            t.priority.to_string(),
+                                        )
+                                    })
+                                    .collect();
+                                (tasks, guard.task_board_summary())
+                            };
+                            if tasks.is_empty() {
+                                renderer.write_line(
+                                    &format!("no tasks in team '{}'", team_name),
+                                    C_AGENT,
+                                )?;
+                            } else {
+                                renderer.write_line(&format!("team '{}' tasks: {} total, {} done, {} pending, {} blocked, {} in_progress", team_name, summary.total, summary.done, summary.pending, summary.blocked, summary.in_progress), C_AGENT)?;
+                                for (id, content, status, priority) in tasks {
+                                    renderer.write_line(
+                                        &format!(
+                                            "  [{}] {} — {} ({})",
+                                            id, content, status, priority
+                                        ),
+                                        C_RESULT,
+                                    )?;
+                                }
+                            }
+                        }
+                    }
+                }
+                "status" => {
+                    // usage: /team status <team>
+                    let team_name = parts.get(2).copied().unwrap_or("").trim();
+                    if team_name.is_empty() {
+                        renderer.write_line("usage: /team status <team>", C_ERROR)?;
+                        return Ok(());
+                    }
+                    match team_context.teams.get(team_name) {
+                        None => renderer
+                            .write_line(&format!("team '{}' not found", team_name), C_ERROR)?,
+                        Some(arc) => {
+                            let (member_ids, task_summary) = {
+                                let guard = arc.read().unwrap_or_else(|e| e.into_inner());
+                                (guard.members().to_vec(), guard.task_board_summary())
+                            };
+                            renderer.write_line(
+                                &format!("team '{}' ({} members):", team_name, member_ids.len()),
+                                C_AGENT,
+                            )?;
+                            for id in member_ids {
+                                let snap =
+                                    subagent_registry.list().into_iter().find(|s| s.id == id);
+                                if let Some(s) = snap {
+                                    renderer.write_line(
+                                        &format!("  [{}] {} — {}", s.id, s.name, s.status),
+                                        C_RESULT,
+                                    )?;
+                                }
+                            }
+                            renderer.write_line(
+                                &format!(
+                                    "  tasks: {}/{} done",
+                                    task_summary.done, task_summary.total
+                                ),
+                                C_RESULT,
+                            )?;
+                        }
+                    }
+                }
+                "disband" => {
+                    // usage: /team disband <team>
+                    let team_name = parts.get(2).copied().unwrap_or("").trim();
+                    if team_name.is_empty() {
+                        renderer.write_line("usage: /team disband <team>", C_ERROR)?;
+                        return Ok(());
+                    }
+                    match team_context.teams.get(team_name) {
+                        None => renderer
+                            .write_line(&format!("team '{}' not found", team_name), C_ERROR)?,
+                        Some(arc) => {
+                            let member_ids: Vec<_> = {
+                                let guard = arc.read().unwrap_or_else(|e| e.into_inner());
+                                guard.members().to_vec()
+                            };
+                            for id in &member_ids {
+                                let _ = subagent_registry.stop(*id);
+                            }
+                            let _ = team_context.teams.remove(team_name);
+                            renderer
+                                .write_line(&format!("disbanded team '{}'", team_name), C_AGENT)?;
+                        }
+                    }
+                }
+                other => {
+                    renderer.write_line(
+                        &format!("unknown /team command: {} (try /help)", other),
+                        C_ERROR,
+                    )?;
+                }
+            }
+        }
         _ => {
             renderer.write_line(
                 &format!("unknown command: {} (try /help)", parts[0]),

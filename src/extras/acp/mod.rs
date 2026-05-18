@@ -166,6 +166,8 @@ async fn run_prompt(
         sandbox,
         #[cfg(feature = "mcp")]
         None::<&crate::extras::mcp::McpClientManager>,
+        #[cfg(feature = "teams")]
+        None,
     )
     .await;
 

@@ -4,13 +4,15 @@ use rig::completion::CompletionModel;
 use rig::providers::openrouter;
 
 use crate::agent::prompt::{SYSTEM_PROMPT, TODO_TOOLS_PROMPT};
-use crate::agent::toolset::{ToolPreset, ToolSet};
 use crate::agent::tools;
+use crate::agent::toolset::{ToolPreset, ToolSet};
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::context::ContextFiles;
 #[cfg(feature = "mcp")]
 use crate::extras::mcp::McpClientManager;
+#[cfg(feature = "teams")]
+use crate::extras::teams::TeamContext;
 use crate::permission::ask::AskSender;
 use crate::permission::checker::PermCheck;
 use crate::sandbox::Sandbox;
@@ -22,6 +24,12 @@ pub type ZAgent = Agent<openrouter::CompletionModel>;
 ///
 /// Pass `ToolSet::default()` for the lead agent — this includes all tools,
 /// matching pre-existing behavior. Subagents can pass a restricted `ToolSet`.
+///
+/// When `team_context` is `Some`, LLM-callable team tools are added to the
+/// agent's tool set. All team agents (lead and members) receive the 4 shared
+/// communication tools. Only the lead agent (`is_lead: true`) additionally
+/// receives the 5 lead-only structural tools.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_agent_inner<M: CompletionModel + 'static>(
     model: M,
     cli: &Cli,
@@ -32,6 +40,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
     sandbox: Sandbox,
     tool_set: &ToolSet,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
+    #[cfg(feature = "teams")] team_context: Option<&TeamContext>,
 ) -> Agent<M> {
     let mut preamble = SYSTEM_PROMPT.to_string();
     preamble.push('\n');
@@ -140,6 +149,64 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
                     .map(|t| Box::new(t) as Box<dyn rig::tool::ToolDyn>)
                     .collect();
                 builder = builder.tools(dyn_tools);
+            }
+        }
+
+        #[cfg(feature = "teams")]
+        if let Some(tc) = team_context {
+            use crate::extras::subagent::tools::{AgentSpawnTool, AgentStatusTool, AgentStopTool};
+            use crate::extras::teams::tools::{
+                AgentMessageTool, TeamCreateTool, TeamDisbandTool, TeamListTool, TeamMessageTool,
+                TeamSpawnTool, TeamStatusTool, TeamTasksTool,
+            };
+            use std::sync::Arc;
+            let teams = Arc::clone(&tc.teams);
+            let agents = Arc::clone(teams.agents());
+
+            // Shared tools: both lead and subagents receive these.
+            let shared_tools: Vec<Box<dyn rig::tool::ToolDyn>> = vec![
+                Box::new(AgentMessageTool {
+                    agents: Arc::clone(&agents),
+                }),
+                Box::new(TeamMessageTool {
+                    team_registry: Arc::clone(&teams),
+                }),
+                Box::new(TeamStatusTool {
+                    team_registry: Arc::clone(&teams),
+                }),
+                Box::new(TeamListTool {
+                    team_registry: Arc::clone(&teams),
+                }),
+                Box::new(TeamTasksTool {
+                    team_registry: Arc::clone(&teams),
+                }),
+            ];
+            builder = builder.tools(shared_tools);
+
+            // Lead-only tools: structural/destructive operations.
+            if tc.is_lead {
+                let lead_tools: Vec<Box<dyn rig::tool::ToolDyn>> = vec![
+                    Box::new(AgentSpawnTool {
+                        registry: Arc::clone(&agents),
+                    }),
+                    Box::new(AgentStopTool {
+                        registry: Arc::clone(&agents),
+                    }),
+                    Box::new(AgentStatusTool {
+                        registry: Arc::clone(&agents),
+                    }),
+                    Box::new(TeamCreateTool {
+                        team_registry: Arc::clone(&teams),
+                    }),
+                    Box::new(TeamSpawnTool {
+                        registry: Arc::clone(&agents),
+                        team_registry: Arc::clone(&teams),
+                    }),
+                    Box::new(TeamDisbandTool {
+                        team_registry: Arc::clone(&teams),
+                    }),
+                ];
+                builder = builder.tools(lead_tools);
             }
         }
 

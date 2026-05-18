@@ -170,7 +170,22 @@ async fn main() -> anyhow::Result<()> {
     let completion_model = client.completion_model(model.to_string());
 
     #[cfg(feature = "subagent")]
-    let subagent_registry = extras::subagent::registry::SubagentRegistry::new();
+    let subagent_registry = {
+        use std::sync::Arc;
+        Arc::new(extras::subagent::registry::SubagentRegistry::new())
+    };
+
+    #[cfg(feature = "teams")]
+    let lead_team_context = {
+        use std::sync::Arc;
+        extras::teams::TeamContext {
+            teams: Arc::new(extras::teams::registry::TeamRegistry::new(Arc::clone(
+                &subagent_registry,
+            ))),
+            is_lead: true,
+        }
+    };
+
     if cli.print {
         let agent = provider::build_agent(
             completion_model,
@@ -182,6 +197,8 @@ async fn main() -> anyhow::Result<()> {
             sandbox.clone(),
             #[cfg(feature = "mcp")]
             mcp_manager.as_ref(),
+            #[cfg(feature = "teams")]
+            Some(&lead_team_context),
         )
         .await;
         let msg = cli.message.join(" ");
@@ -207,6 +224,8 @@ async fn main() -> anyhow::Result<()> {
                 sandbox.clone(),
                 #[cfg(feature = "mcp")]
                 mcp_manager.as_ref(),
+                #[cfg(feature = "teams")]
+                Some(&lead_team_context),
             )
             .await;
             return run_headless_loop(agent, &cli, &cfg, &context).await;
@@ -222,6 +241,8 @@ async fn main() -> anyhow::Result<()> {
             sandbox.clone(),
             #[cfg(feature = "mcp")]
             mcp_manager.as_ref(),
+            #[cfg(feature = "teams")]
+            Some(&lead_team_context),
         )
         .await;
 
@@ -253,6 +274,8 @@ async fn main() -> anyhow::Result<()> {
             mcp_manager.as_ref(),
             #[cfg(feature = "subagent")]
             subagent_registry,
+            #[cfg(feature = "teams")]
+            lead_team_context,
         )
         .await?;
     }

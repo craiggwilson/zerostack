@@ -21,7 +21,15 @@ mcp = [
     "rmcp?/transport-streamable-http-client-reqwest",
 ]
 acp = ["dep:agent-client-protocol"]
+# Spawn parallel subagent workers. Enables /agent spawn|stop|list|view slash commands,
+# SubagentRegistry, the bus relay system, and inbox-drain re-spawn on task completion.
 subagent = []
+# Group subagents into named teams. Implies `subagent`. Enables /team create|spawn|status|task
+# slash commands, the shared TaskBoard, team context injection at spawn, and LLM-callable team
+# tools. Lead agents get all 9 tools (agent_spawn, agent_stop, agent_status, team_create,
+# team_disband, agent_message, team_message, team_status, team_tasks). Subagents get the 4
+# shared communication tools (agent_message, team_message, team_status, team_tasks).
+teams = ["subagent"]
 
 [dependencies]
 rig = { version = "0.37", features = ["rmcp"] }

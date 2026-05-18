@@ -12,3 +12,6 @@ pub mod acp;
 
 #[cfg(feature = "subagent")]
 pub mod subagent;
+
+#[cfg(feature = "teams")]
+pub mod teams;

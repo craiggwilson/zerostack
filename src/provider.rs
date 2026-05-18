@@ -284,11 +284,7 @@ pub enum AnyAgent {
 }
 
 impl AnyAgent {
-    pub async fn run_print(
-        &self,
-        prompt: &str,
-        max_turns: usize,
-    ) -> anyhow::Result<String> {
+    pub async fn run_print(&self, prompt: &str, max_turns: usize) -> anyhow::Result<String> {
         match self {
             AnyAgent::OpenRouter(a) => runner::run_print(a, prompt, max_turns).await,
             AnyAgent::OpenAI(a) => runner::run_print(a, prompt, max_turns).await,
@@ -344,7 +340,10 @@ pub fn create_client(
     let extra_headers = if info.extra_headers.is_empty() {
         None
     } else {
-        Some(build_header_map(&info.extra_headers, auth_handled_by_headers)?)
+        Some(build_header_map(
+            &info.extra_headers,
+            auth_handled_by_headers,
+        )?)
     };
 
     match info.kind {
@@ -419,7 +418,7 @@ pub fn create_client(
 /// Pure mechanical dispatch: match AnyModel and call build_agent_inner for each variant.
 ///
 /// This is the single place where AnyModel → AnyAgent dispatch occurs.
-/// Callers supply all varying parameters (tool_set) explicitly;
+/// Callers supply all varying parameters (tool_set, team_context) explicitly;
 /// this function contains no behavioral logic or defaults.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_agent_from_model(
@@ -432,6 +431,7 @@ pub async fn build_agent_from_model(
     sandbox: Sandbox,
     tool_set: &ToolSet,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
+    #[cfg(feature = "teams")] team_context: Option<&crate::extras::teams::TeamContext>,
 ) -> AnyAgent {
     match model {
         AnyModel::OpenRouter(m) => AnyAgent::OpenRouter(
@@ -439,6 +439,8 @@ pub async fn build_agent_from_model(
                 m, cli, cfg, context, permission, ask_tx, sandbox.clone(), tool_set,
                 #[cfg(feature = "mcp")]
                 mcp_manager,
+                #[cfg(feature = "teams")]
+                team_context,
             )
             .await,
         ),
@@ -447,6 +449,8 @@ pub async fn build_agent_from_model(
                 m, cli, cfg, context, permission, ask_tx, sandbox.clone(), tool_set,
                 #[cfg(feature = "mcp")]
                 mcp_manager,
+                #[cfg(feature = "teams")]
+                team_context,
             )
             .await,
         ),
@@ -455,6 +459,8 @@ pub async fn build_agent_from_model(
                 m, cli, cfg, context, permission, ask_tx, sandbox.clone(), tool_set,
                 #[cfg(feature = "mcp")]
                 mcp_manager,
+                #[cfg(feature = "teams")]
+                team_context,
             )
             .await,
         ),
@@ -463,6 +469,8 @@ pub async fn build_agent_from_model(
                 m, cli, cfg, context, permission, ask_tx, sandbox.clone(), tool_set,
                 #[cfg(feature = "mcp")]
                 mcp_manager,
+                #[cfg(feature = "teams")]
+                team_context,
             )
             .await,
         ),
@@ -471,6 +479,8 @@ pub async fn build_agent_from_model(
                 m, cli, cfg, context, permission, ask_tx, sandbox, tool_set,
                 #[cfg(feature = "mcp")]
                 mcp_manager,
+                #[cfg(feature = "teams")]
+                team_context,
             )
             .await,
         ),
@@ -479,6 +489,8 @@ pub async fn build_agent_from_model(
                 m, cli, cfg, context, permission, ask_tx, sandbox.clone(), tool_set,
                 #[cfg(feature = "mcp")]
                 mcp_manager,
+                #[cfg(feature = "teams")]
+                team_context,
             )
             .await,
         ),
@@ -498,12 +510,15 @@ pub async fn build_agent(
     ask_tx: Option<AskSender>,
     sandbox: Sandbox,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
+    #[cfg(feature = "teams")] team_context: Option<&crate::extras::teams::TeamContext>,
 ) -> AnyAgent {
     let tool_set = ToolSet::default();
     build_agent_from_model(
         model, cli, cfg, context, permission, ask_tx, sandbox, &tool_set,
         #[cfg(feature = "mcp")]
         mcp_manager,
+        #[cfg(feature = "teams")]
+        team_context,
     )
     .await
 }

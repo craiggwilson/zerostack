@@ -136,6 +136,7 @@ impl SubagentRegistry {
         sandbox: Sandbox,
         bus_tx: BusSender,
         #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
+        #[cfg(feature = "teams")] team_context: Option<&crate::extras::teams::TeamContext>,
     ) -> anyhow::Result<SubagentId> {
         // Phase 1: Validate and allocate ID (synchronous, brief lock).
         let id = {
@@ -162,6 +163,8 @@ impl SubagentRegistry {
             &config.tool_set,
             #[cfg(feature = "mcp")]
             mcp_manager,
+            #[cfg(feature = "teams")]
+            team_context,
         )
         .await;
 

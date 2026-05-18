@@ -15,6 +15,8 @@ Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/lates
 - **Integrated Ralph Wiggum loops**: looping capabilities for long-horizon tasks
 - **Integrated Git Worktrees integration**: Use `/worktree` to move the agent from one worktree to another.
 - **ACP support** (gated): Agent Communication Protocol server — lets editors (Zed, etc.) connect to zerostack as an ACP agent
+- **Subagents** (gated): Spawn parallel subagent workers with `/agent spawn`. Subagents run independently and stream their output back to the TUI.
+- **Teams** (gated): Group subagents into named teams with `/team create`. The lead agent receives LLM-callable tools to manage members, broadcast messages, and track a shared task board.
 
 **NOTE**: Windows support is not tested is any way, but feel free to try and open an issue if you encounter any bugs!
 
@@ -150,6 +152,16 @@ This is a list of the most important slash commands:
 - `/loop` — Schedule recurring prompts
 - `/prompt` — List or change the agent's prompt
 - `/mode` — Set the permission system's mode
+- `/agent spawn <name> [--fork] [--readonly|--no-tools] <prompt>` — Spawn a subagent (`subagent` feature)
+- `/agent stop <name>` — Stop a subagent
+- `/agent list` — List all active subagents
+- `/agent view <name>` — Switch the TUI view to a subagent's output
+- `/team create <name>` — Create a team and rebuild the lead agent with team tools (`teams` feature)
+- `/team spawn <name> [--fork] [--readonly] <prompt>` — Spawn a new team member subagent
+- `/team status` — Show team members and task board
+- `/team task add [--priority high|medium|low] <content>` — Add a task to the team task board
+- `/team task done <id>` — Mark a task as done
+- `/team task list` — List all tasks
 
 To see all of the commands, use `/help`.
 

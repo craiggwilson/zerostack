@@ -121,7 +121,6 @@ pub async fn run_print<M, P>(
     agent: &Agent<M, P>,
     prompt: &str,
     max_turns: usize,
-
 ) -> anyhow::Result<String>
 where
     M: CompletionModel + 'static,

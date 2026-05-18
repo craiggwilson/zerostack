@@ -10,6 +10,7 @@ pub mod view;
 
 #[cfg(feature = "subagent")]
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use compact_str::CompactString;
 use crossterm::event;
@@ -117,6 +118,7 @@ fn format_tool_call_summary(name: &str, args: &serde_json::Value) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_interactive(
     client: AnyClient,
     mut agent: AnyAgent,
@@ -129,7 +131,8 @@ pub async fn run_interactive(
     mut ask_rx: Option<AskReceiver>,
     sandbox: Sandbox,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
-    #[cfg(feature = "subagent")] subagent_registry: SubagentRegistry,
+    #[cfg(feature = "subagent")] subagent_registry: Arc<SubagentRegistry>,
+    #[cfg(feature = "teams")] lead_team_context: crate::extras::teams::TeamContext,
 ) -> anyhow::Result<()> {
     let _guard = TerminalGuard::new()?;
 
@@ -157,8 +160,8 @@ pub async fn run_interactive(
     // INVARIANT: All view_buffer writes happen in this UI event loop.
     // The relay task only sends BusEvents to the bus channel — it never
     // background tokens are written to view_manager's inactive buffers. No locks needed.
-    #[cfg(feature = "subagent")]
-    let subagent_registry = SubagentRegistry::new();
+    // subagent_registry is passed in from main (created before the initial agent build
+    // so the team context can reference it).
     #[cfg(feature = "subagent")]
     let (bus_tx, bus_rx_inner) = create_bus();
     // Keep one sender clone alive so the bus channel never closes while the
@@ -178,6 +181,7 @@ pub async fn run_interactive(
     // lead to become idle. Capped at MAX_PENDING_INJECTIONS.
     #[cfg(feature = "subagent")]
     let mut pending_injections: VecDeque<(SubagentId, String)> = VecDeque::new();
+
     let perm_mode = || -> Option<String> {
         permission.as_ref().map(|p| {
             p.lock()
@@ -474,7 +478,7 @@ pub async fn run_interactive(
                                     renderer.write_line(&format!("> {}", safe_line), Color::Green)?;
                                 }
                                 renderer.write_line("", Color::White)?;
-                                let result = handle_slash(&text, &mut agent, &client, &mut renderer, session, cli, cfg, context, &mut show_reasoning, &mut is_running, &mut input, &permission, &ask_tx, &mut todo_tools_enabled, &sandbox, #[cfg(feature = "loop")] &mut loop_state, #[cfg(feature = "mcp")] mcp_manager, &mut view_manager, #[cfg(feature = "subagent")] &subagent_registry, #[cfg(feature = "subagent")] &bus_tx).await;
+                                let result = handle_slash(&text, &mut agent, &client, &mut renderer, session, cli, cfg, context, &mut show_reasoning, &mut is_running, &mut input, &permission, &ask_tx, &mut todo_tools_enabled, &sandbox, #[cfg(feature = "loop")] &mut loop_state, #[cfg(feature = "mcp")] mcp_manager, &mut view_manager, #[cfg(feature = "subagent")] &subagent_registry, #[cfg(feature = "subagent")] &bus_tx, #[cfg(feature = "teams")] &lead_team_context).await;
                                 match result {
                                 Err(e) if e.to_string().starts_with("DEFER_COMPRESS:") => {
                                     let err_msg = e.to_string();
@@ -487,6 +491,7 @@ pub async fn run_interactive(
                                             &mut agent, &client, &mut renderer, session, cli, cfg, context,
                                             &permission, &ask_tx, &sandbox,
                                             #[cfg(feature = "mcp")] mcp_manager,
+                                            #[cfg(feature = "teams")] &lead_team_context,
                                         ).await;
                                         if let Err(e) = compress_result {
                                             renderer.write_line(&format!("compress error: {}", e), C_ERROR)?;
@@ -537,13 +542,14 @@ pub async fn run_interactive(
                                                 permission.clone(),
                                                 ask_tx.clone(),
                                                 sandbox.clone(),
-                                                #[cfg(feature = "mcp")] mcp_manager,
-                                            ).await;
-                                            render_session(&mut renderer, session, cli, cfg, context)?;
-                                            renderer.write_line(
-                                                &format!("returned to main repo at {}", main_path),
-                                                C_AGENT,
-                                            )?;
+                                                 #[cfg(feature = "mcp")] mcp_manager,
+                                                 #[cfg(feature = "teams")] Some(&lead_team_context),
+                                             ).await;
+                                             render_session(&mut renderer, session, cli, cfg, context)?;
+                                             renderer.write_line(
+                                                 &format!("returned to main repo at {}", main_path),
+                                                 C_AGENT,
+                                             )?;
                                         }
                                     }
                                     Err(e) => {
@@ -742,6 +748,7 @@ pub async fn run_interactive(
                                 &mut agent, &client, &mut renderer, session, cli, cfg, context,
                                 &permission, &ask_tx, &sandbox,
                                 #[cfg(feature = "mcp")] mcp_manager,
+                                #[cfg(feature = "teams")] &lead_team_context,
                             ).await;
                             if let Err(e) = compress_result {
                                 renderer.write_line(&format!("auto-compact error: {}", e), C_ERROR)?;
@@ -818,6 +825,7 @@ pub async fn run_interactive(
                                         ask_tx.clone(),
                                         sandbox.clone(),
                                         #[cfg(feature = "mcp")] mcp_manager,
+                                        #[cfg(feature = "teams")] Some(&lead_team_context),
                                     ).await;
                                     render_session(&mut renderer, session, cli, cfg, context)?;
                                     renderer.write_line(
@@ -927,7 +935,6 @@ pub async fn run_interactive(
                                 renderer.write_line(&safe, C_AGENT)?;
                             }
                             view_manager.write_to_inactive(&view_id, vec![entry]);
-
                             // Inbox drain re-spawn (task 3.5):
                             // If a message is queued, re-spawn the runner for this subagent.
                             // Sequence: abort-first (old relay), then spawn new runner + relays.
@@ -1027,8 +1034,24 @@ pub async fn run_interactive(
                                     let _ = subagent_registry.send_message(target_id, content.to_string());
                                 }
                                 crate::extras::subagent::MessageTarget::Broadcast => {
-                                    let line = format!("[{} broadcast]: {}", from_name, content);
-                                    renderer.write_line(&sanitize_output(&line), C_AGENT)?;
+                                    #[cfg(feature = "teams")]
+                                    {
+                                        // Broadcast to all members of all teams.
+                                        let mut total_delivered = 0usize;
+                                        for team_name in lead_team_context.teams.list() {
+                                            if let Some(arc) = lead_team_context.teams.get(&team_name) {
+                                                let guard = arc.read().unwrap_or_else(|e| e.into_inner());
+                                                total_delivered += guard.message(content.to_string());
+                                            }
+                                        }
+                                        let line = format!("[{} broadcast]: {} ({} delivered)", from_name, content, total_delivered);
+                                        renderer.write_line(&sanitize_output(&line), C_AGENT)?;
+                                    }
+                                    #[cfg(not(feature = "teams"))]
+                                    {
+                                        let line = format!("[{} broadcast]: {}", from_name, content);
+                                        renderer.write_line(&sanitize_output(&line), C_AGENT)?;
+                                    }
                                 }
                             }
                         }
