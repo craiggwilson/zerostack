@@ -151,6 +151,33 @@ impl ViewManager {
         Ok(())
     }
 
+    /// Write a buffer snapshot into a named view without switching to it.
+    ///
+    /// Used by background producers to accumulate output into a view that is
+    /// not currently displayed. If the view is currently active, this is a
+    /// no-op — the renderer already holds the live buffer.
+    pub fn write_to_inactive(&mut self, id: &ViewId, entries: Vec<LineEntry>) {
+        if self.active == ActiveView::Named(id.clone()) {
+            // View is currently displayed; renderer holds the live buffer.
+            return;
+        }
+        self.named_buffers
+            .entry(id.clone())
+            .or_default()
+            .extend(entries);
+    }
+
+    /// Remove a named view's buffer.
+    ///
+    /// If the view is currently active, switches to lead first.
+    pub fn remove(&mut self, id: &ViewId, renderer: &mut Renderer) -> std::io::Result<()> {
+        if self.active == ActiveView::Named(id.clone()) {
+            self.switch_to_lead(renderer)?;
+        }
+        self.named_buffers.remove(id);
+        Ok(())
+    }
+
     /// Returns `true` if a named view with this id has been registered.
     pub fn has_view(&self, id: &ViewId) -> bool {
         self.named_buffers.contains_key(id)

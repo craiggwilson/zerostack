@@ -21,6 +21,7 @@ mcp = [
     "rmcp?/transport-streamable-http-client-reqwest",
 ]
 acp = ["dep:agent-client-protocol"]
+subagent = []
 
 [dependencies]
 rig = { version = "0.37", features = ["rmcp"] }

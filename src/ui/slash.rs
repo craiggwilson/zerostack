@@ -11,6 +11,11 @@ use crate::config::Config;
 use crate::context::ContextFiles;
 #[cfg(feature = "mcp")]
 use crate::extras::mcp::McpClientManager;
+#[cfg(feature = "subagent")]
+use crate::extras::subagent::{
+    ContextMode,
+    registry::{SpawnConfig, SubagentRegistry},
+};
 use crate::permission::SecurityMode;
 use crate::provider::{AnyAgent, AnyClient};
 use crate::session::{MessageRole, Session};
@@ -141,6 +146,8 @@ pub async fn handle_slash(
     #[cfg(feature = "loop")] loop_state: &mut Option<crate::extras::r#loop::LoopState>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
     view_manager: &mut ViewManager,
+    #[cfg(feature = "subagent")] subagent_registry: &Arc<SubagentRegistry>,
+    #[cfg(feature = "subagent")] bus_tx: &crate::extras::subagent::bus::BusSender,
 ) -> anyhow::Result<()> {
     let permission = &ctx.permission;
     let parts: SmallVec<[&str; 3]> = text.trim().splitn(3, ' ').collect();
@@ -794,6 +801,25 @@ pub async fn handle_slash(
             }
             renderer.write_line("  /view [name]           list views or switch to a named view", C_RESULT)?;
             renderer.write_line("  /view default          return to the main view", C_RESULT)?;
+            #[cfg(feature = "subagent")]
+            {
+                let _ = renderer.write_line("", C_AGENT);
+                let _ = renderer.write_line("subagent commands:", C_AGENT);
+                let _ = renderer.write_line(
+                    "  /agent spawn <name> [--fork] [--readonly|--no-tools] <prompt>",
+                    C_RESULT,
+                );
+                let _ = renderer.write_line(
+                    "  /agent msg <name> <message>    send message to subagent inbox",
+                    C_RESULT,
+                );
+                let _ = renderer.write_line(
+                    "  /agent status                  list all subagents and status",
+                    C_RESULT,
+                );
+                let _ = renderer
+                    .write_line("  /agent stop <name>             stop a subagent", C_RESULT);
+            }
             renderer.write_line("  /quit                  exit zerostack", C_RESULT)?;
             renderer.write_line("  /help                  show this message", C_RESULT)?;
             renderer.write_line("", C_AGENT)?;
@@ -849,6 +875,158 @@ pub async fn handle_slash(
                 } else {
                     view_manager.switch_to(id.clone(), renderer)?;
                     renderer.write_line(&format!("(viewing '{}')", target), C_AGENT)?;
+                }
+            }
+        }
+        #[cfg(feature = "subagent")]
+        "/agent" => {
+            if parts.len() < 2 {
+                renderer.write_line("usage: /agent <spawn|msg|status|stop>", C_ERROR)?;
+                return Ok(());
+            }
+            match parts[1] {
+                "spawn" => {
+                    let rest = parts.get(2).copied().unwrap_or("").to_string();
+                    let mut args: Vec<&str> = rest.split_whitespace().collect();
+                    if args.is_empty() {
+                        renderer.write_line(
+                            "usage: /agent spawn <name> [--fork] [--readonly|--no-tools] <prompt>",
+                            C_ERROR,
+                        )?;
+                        return Ok(());
+                    }
+                    let name = args.remove(0).to_string();
+                    let mut context_mode = ContextMode::Fresh;
+                    let mut tool_set_for_agent = ToolSet::default();
+                    let mut prompt_parts: Vec<&str> = Vec::new();
+                    let mut i = 0;
+                    while i < args.len() {
+                        match args[i] {
+                            "--fork" => {
+                                context_mode = ContextMode::Fork;
+                                i += 1;
+                            }
+                            "--readonly" => {
+                                tool_set_for_agent = ToolSet::read_only();
+                                i += 1;
+                            }
+                            "--no-tools" => {
+                                tool_set_for_agent = ToolSet::no_tools();
+                                i += 1;
+                            }
+                            other => {
+                                prompt_parts.push(other);
+                                i += 1;
+                            }
+                        }
+                    }
+                    if prompt_parts.is_empty() {
+                        renderer.write_line("spawn requires a prompt", C_ERROR)?;
+                        return Ok(());
+                    }
+                    let model_name = session.model.to_string();
+                    let config = SpawnConfig {
+                        name: name.clone(),
+                        prompt: prompt_parts.join(" "),
+                        model_name,
+                        context_mode,
+                        tool_set: tool_set_for_agent,
+                    };
+                    match subagent_registry
+                        .spawn(
+                            config,
+                            client,
+                            cli,
+                            cfg,
+                            context,
+                            Some(session),
+                            ctx,
+                            bus_tx.clone(),
+                        )
+                        .await
+                    {
+                        Ok(id) => {
+                            view_manager.write_to_inactive(
+                                &crate::ui::view::ViewId::new(&name),
+                                Vec::new(),
+                            );
+                            renderer.write_line(
+                                &format!("spawned subagent '{}' (id={})", name, id),
+                                C_AGENT,
+                            )?;
+                        }
+                        Err(e) => {
+                            renderer.write_line(&format!("spawn failed: {}", e), C_ERROR)?;
+                        }
+                    }
+                }
+                "msg" => {
+                    let rest = parts.get(2).copied().unwrap_or("");
+                    let mut words = rest.splitn(2, ' ');
+                    let name = words.next().unwrap_or("").trim();
+                    let message = words.next().unwrap_or("").trim();
+                    if name.is_empty() || message.is_empty() {
+                        renderer.write_line("usage: /agent msg <name> <message>", C_ERROR)?;
+                        return Ok(());
+                    }
+                    match subagent_registry.id_by_name(name) {
+                        Some(id) => {
+                            if let Err(e) = subagent_registry.send_message(id, message.to_string()) {
+                                renderer.write_line(&format!("msg failed: {}", e), C_ERROR)?;
+                            } else {
+                                renderer.write_line(&format!("message sent to '{}'", name), C_AGENT)?;
+                            }
+                        }
+                        None => {
+                            renderer.write_line(&format!("no subagent named '{}'", name), C_ERROR)?;
+                        }
+                    }
+                }
+                "status" => {
+                    let agents = subagent_registry.list();
+                    if agents.is_empty() {
+                        renderer.write_line("no subagents", C_AGENT)?;
+                    } else {
+                        renderer.write_line(&format!("{} subagent(s):", agents.len()), C_AGENT)?;
+                        for snap in agents {
+                            let summary = snap
+                                .final_response
+                                .as_deref()
+                                .map(|r| format!("  last: {}", &r[..r.len().min(60)]))
+                                .unwrap_or_default();
+                            renderer.write_line(
+                                &format!("  [{}] {} — {}{}", snap.id, snap.name, snap.status, summary),
+                                C_RESULT,
+                            )?;
+                        }
+                    }
+                }
+                "stop" => {
+                    let name = parts.get(2).copied().unwrap_or("").trim();
+                    if name.is_empty() {
+                        renderer.write_line("usage: /agent stop <name>", C_ERROR)?;
+                        return Ok(());
+                    }
+                    match subagent_registry.id_by_name(name) {
+                        Some(id) => {
+                            let view_id = crate::ui::view::ViewId::new(name);
+                            view_manager.remove(&view_id, renderer)?;
+                            if let Err(e) = subagent_registry.stop(id) {
+                                renderer.write_line(&format!("stop failed: {}", e), C_ERROR)?;
+                            } else {
+                                renderer.write_line(&format!("stopped subagent '{}'", name), C_AGENT)?;
+                            }
+                        }
+                        None => {
+                            renderer.write_line(&format!("no subagent named '{}'", name), C_ERROR)?;
+                        }
+                    }
+                }
+                other => {
+                    renderer.write_line(
+                        &format!("unknown /agent command: {} (try /help)", other),
+                        C_ERROR,
+                    )?;
                 }
             }
         }

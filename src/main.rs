@@ -13,6 +13,8 @@ mod ui;
 #[cfg(test)]
 mod tests;
 
+use std::sync::Arc;
+
 use clap::Parser;
 use session::MessageRole;
 
@@ -190,6 +192,19 @@ async fn main() -> anyhow::Result<()> {
 
     let completion_model = client.completion_model(model.to_string());
 
+    #[cfg(feature = "subagent")]
+    let subagent_registry = Arc::new(extras::subagent::registry::SubagentRegistry::new());
+
+    // Register subagent tools on the lead's ToolSet only.
+    #[cfg(feature = "subagent")]
+    {
+        let spawn_tool = extras::subagent::tools::AgentSpawnTool { registry: Arc::clone(&subagent_registry) };
+        tool_set.register_tool(ToolName::from("agent_spawn"), Box::new(spawn_tool));
+        let stop_tool = extras::subagent::tools::AgentStopTool { registry: Arc::clone(&subagent_registry) };
+        tool_set.register_tool(ToolName::from("agent_stop"), Box::new(stop_tool));
+        let status_tool = extras::subagent::tools::AgentStatusTool { registry: Arc::clone(&subagent_registry) };
+        tool_set.register_tool(ToolName::from("agent_status"), Box::new(status_tool));
+    }
     if cli.print {
         let agent =
             provider::build_agent(completion_model, &cli, &cfg, &context, &tool_ctx, &tool_set)
@@ -241,6 +256,8 @@ async fn main() -> anyhow::Result<()> {
             ask_rx,
             #[cfg(feature = "mcp")]
             mcp_manager.as_ref(),
+            #[cfg(feature = "subagent")]
+            subagent_registry,
         )
         .await?;
     }
