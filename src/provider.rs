@@ -10,6 +10,7 @@ use rig::streaming::StreamingChat;
 use crate::agent::builder;
 use crate::agent::prompt;
 use crate::agent::runner::{self, AgentRunner};
+use crate::agent::toolset::ToolSet;
 use crate::cli::Cli;
 use crate::config::{Config, CustomProviderConfig};
 use crate::context::ContextFiles;
@@ -425,16 +426,12 @@ pub async fn build_agent(
     sandbox: Sandbox,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
 ) -> AnyAgent {
+    let tool_set = ToolSet::default();
+
     match model {
         AnyModel::OpenRouter(m) => AnyAgent::OpenRouter(
             builder::build_agent_inner(
-                m,
-                cli,
-                cfg,
-                context,
-                permission,
-                ask_tx,
-                sandbox.clone(),
+                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), &tool_set,
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -442,13 +439,7 @@ pub async fn build_agent(
         ),
         AnyModel::OpenAI(m) => AnyAgent::OpenAI(
             builder::build_agent_inner(
-                m,
-                cli,
-                cfg,
-                context,
-                permission,
-                ask_tx,
-                sandbox.clone(),
+                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), &tool_set,
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -456,13 +447,7 @@ pub async fn build_agent(
         ),
         AnyModel::Anthropic(m) => AnyAgent::Anthropic(
             builder::build_agent_inner(
-                m,
-                cli,
-                cfg,
-                context,
-                permission,
-                ask_tx,
-                sandbox.clone(),
+                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), &tool_set,
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -470,13 +455,7 @@ pub async fn build_agent(
         ),
         AnyModel::Gemini(m) => AnyAgent::Gemini(
             builder::build_agent_inner(
-                m,
-                cli,
-                cfg,
-                context,
-                permission,
-                ask_tx,
-                sandbox.clone(),
+                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), &tool_set,
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -484,13 +463,7 @@ pub async fn build_agent(
         ),
         AnyModel::Ollama(m) => AnyAgent::Ollama(
             builder::build_agent_inner(
-                m,
-                cli,
-                cfg,
-                context,
-                permission,
-                ask_tx,
-                sandbox,
+                m, cli, cfg, context, permission, ask_tx, sandbox, &tool_set,
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )
@@ -498,13 +471,7 @@ pub async fn build_agent(
         ),
         AnyModel::Custom(m) => AnyAgent::Custom(
             builder::build_agent_inner(
-                m,
-                cli,
-                cfg,
-                context,
-                permission,
-                ask_tx,
-                sandbox.clone(),
+                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), &tool_set,
                 #[cfg(feature = "mcp")]
                 mcp_manager,
             )

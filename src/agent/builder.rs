@@ -4,6 +4,7 @@ use rig::completion::CompletionModel;
 use rig::providers::openrouter;
 
 use crate::agent::prompt::{SYSTEM_PROMPT, TODO_TOOLS_PROMPT};
+use crate::agent::toolset::{ToolPreset, ToolSet};
 use crate::agent::tools;
 use crate::cli::Cli;
 use crate::config::Config;
@@ -17,6 +18,10 @@ use crate::sandbox::Sandbox;
 #[allow(dead_code)]
 pub type ZAgent = Agent<openrouter::CompletionModel>;
 
+/// Build an agent with the given model, configuration, and tool set.
+///
+/// Pass `ToolSet::default()` for the lead agent — this includes all tools,
+/// matching pre-existing behavior. Subagents can pass a restricted `ToolSet`.
 pub async fn build_agent_inner<M: CompletionModel + 'static>(
     model: M,
     cli: &Cli,
@@ -25,6 +30,7 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
     permission: Option<PermCheck>,
     ask_tx: Option<AskSender>,
     sandbox: Sandbox,
+    tool_set: &ToolSet,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
 ) -> Agent<M> {
     let mut preamble = SYSTEM_PROMPT.to_string();
@@ -58,29 +64,67 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
         builder = builder.temperature(clamped);
     }
 
-    if cli.resolve_no_tools(cfg) {
+    // ToolPreset::None with no force-includes → build without any tools.
+    // Also respect the CLI --no-tools flag for the lead agent (All preset).
+    let no_tools = match tool_set.preset {
+        ToolPreset::None => tool_set.overrides.values().all(|&v| !v),
+        ToolPreset::All => cli.resolve_no_tools(cfg),
+        ToolPreset::ReadOnly => false,
+    };
+
+    if no_tools {
         builder.build()
     } else {
-        let base_tools: Vec<Box<dyn rig::tool::ToolDyn>> = vec![
-            Box::new(tools::ReadTool::new(permission.clone(), ask_tx.clone())),
-            Box::new(tools::WriteTool::new(permission.clone(), ask_tx.clone())),
-            Box::new(tools::EditTool::new(permission.clone(), ask_tx.clone())),
-            Box::new(tools::BashTool::new(
-                permission.clone(),
-                ask_tx.clone(),
-                sandbox.clone(),
-            )),
-            Box::new(tools::GrepTool::new(permission.clone(), ask_tx.clone())),
-            Box::new(tools::FindFilesTool::new(
-                permission.clone(),
-                ask_tx.clone(),
-            )),
-            Box::new(tools::ListDirTool::new(permission.clone(), ask_tx.clone())),
-            Box::new(tools::WriteTodoList::new(
-                permission.clone(),
-                ask_tx.clone(),
-            )),
+        let all_base: Vec<(&str, Box<dyn rig::tool::ToolDyn>)> = vec![
+            (
+                "read",
+                Box::new(tools::ReadTool::new(permission.clone(), ask_tx.clone())),
+            ),
+            (
+                "write",
+                Box::new(tools::WriteTool::new(permission.clone(), ask_tx.clone())),
+            ),
+            (
+                "edit",
+                Box::new(tools::EditTool::new(permission.clone(), ask_tx.clone())),
+            ),
+            (
+                "bash",
+                Box::new(tools::BashTool::new(
+                    permission.clone(),
+                    ask_tx.clone(),
+                    sandbox.clone(),
+                )),
+            ),
+            (
+                "grep",
+                Box::new(tools::GrepTool::new(permission.clone(), ask_tx.clone())),
+            ),
+            (
+                "find_files",
+                Box::new(tools::FindFilesTool::new(
+                    permission.clone(),
+                    ask_tx.clone(),
+                )),
+            ),
+            (
+                "list_dir",
+                Box::new(tools::ListDirTool::new(permission.clone(), ask_tx.clone())),
+            ),
+            (
+                "write_todo_list",
+                Box::new(tools::WriteTodoList::new(
+                    permission.clone(),
+                    ask_tx.clone(),
+                )),
+            ),
         ];
+
+        let base_tools: Vec<Box<dyn rig::tool::ToolDyn>> = all_base
+            .into_iter()
+            .filter(|(name, _)| tool_set.includes(name))
+            .map(|(_, tool)| tool)
+            .collect();
 
         #[allow(unused_mut)]
         let mut builder = builder.tools(base_tools);
