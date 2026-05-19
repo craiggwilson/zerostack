@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use http::HeaderMap;
 use rig::agent::Agent;
 use rig::client::CompletionClient;
 use rig::completion::{CompletionModel, Message};
@@ -45,6 +46,8 @@ pub struct ProviderInfo {
     pub kind: ProviderKind,
     pub base_url: Option<String>,
     pub api_key_env: Option<String>,
+    /// Resolved extra headers (header name → value) to inject into every request.
+    pub extra_headers: HashMap<String, String>,
 }
 
 pub fn resolve_provider_info(
@@ -53,10 +56,22 @@ pub fn resolve_provider_info(
 ) -> Option<ProviderInfo> {
     if let Some(custom) = custom_providers.get(name) {
         let kind = parse_provider(&custom.provider_type)?;
+        let mut extra_headers = HashMap::new();
+        for (header_name, header_val) in &custom.headers {
+            match header_val.resolve() {
+                Ok(val) => {
+                    extra_headers.insert(header_name.clone(), val);
+                }
+                Err(e) => {
+                    tracing::warn!("Skipping custom header {header_name:?}: {e}");
+                }
+            }
+        }
         return Some(ProviderInfo {
             kind,
             base_url: Some(custom.base_url.clone()),
             api_key_env: custom.api_key_env.clone(),
+            extra_headers,
         });
     }
     let kind = parse_provider(name)?;
@@ -64,7 +79,31 @@ pub fn resolve_provider_info(
         kind,
         base_url: None,
         api_key_env: None,
+        extra_headers: HashMap::new(),
     })
+}
+
+fn build_header_map(
+    extra_headers: &HashMap<String, String>,
+    suppress_authorization: bool,
+) -> anyhow::Result<HeaderMap> {
+    let mut map = HeaderMap::new();
+    // Pre-insert a blank Authorization entry so rig's BearerAuth guard skips it,
+    // preventing an unwanted "Authorization: Bearer " header when auth is handled
+    // entirely via custom headers.
+    if suppress_authorization {
+        map.insert(http::header::AUTHORIZATION, "".parse()?);
+    }
+    for (name, value) in extra_headers {
+        let header_name: http::HeaderName = name
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid header name {name:?}: {e}"))?;
+        let header_value: http::HeaderValue = value
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid value for header {name:?}: {e}"))?;
+        map.insert(header_name, header_value);
+    }
+    Ok(map)
 }
 
 fn provider_env_var(kind: ProviderKind) -> &'static str {
@@ -283,7 +322,17 @@ pub fn create_client(
         )
     })?;
 
-    let key = resolve_api_key(info.kind, info.api_key_env.as_deref(), api_key)?;
+    // If auth is fully handled via custom headers and no api_key_env is configured,
+    // skip standard key resolution. We also pre-insert a blank Authorization header
+    // so that rig's BearerAuth guard (which skips inserting if the key is already
+    // present) suppresses the unwanted "Authorization: Bearer " header.
+    let auth_handled_by_headers =
+        !info.extra_headers.is_empty() && info.api_key_env.is_none() && api_key.is_none();
+    let key = if auth_handled_by_headers {
+        String::new()
+    } else {
+        resolve_api_key(info.kind, info.api_key_env.as_deref(), api_key)?
+    };
 
     let base_url = if info.kind == ProviderKind::Custom {
         std::env::var("CUSTOM_BASE_URL").ok()
@@ -291,9 +340,18 @@ pub fn create_client(
         info.base_url
     };
 
+    let extra_headers = if info.extra_headers.is_empty() {
+        None
+    } else {
+        Some(build_header_map(&info.extra_headers, auth_handled_by_headers)?)
+    };
+
     match info.kind {
         ProviderKind::OpenAI => {
             let mut b = openai::CompletionsClient::builder().api_key(&key);
+            if let Some(headers) = extra_headers {
+                b = b.http_headers(headers);
+            }
             if let Some(base_url) = &base_url {
                 b = b.base_url(base_url);
             }
@@ -301,6 +359,9 @@ pub fn create_client(
         }
         ProviderKind::Anthropic => {
             let mut b = anthropic::Client::builder().api_key(&key);
+            if let Some(headers) = extra_headers {
+                b = b.http_headers(headers);
+            }
             if let Some(base_url) = &base_url {
                 b = b.base_url(base_url);
             }
@@ -308,6 +369,9 @@ pub fn create_client(
         }
         ProviderKind::Gemini => {
             let mut b = gemini::Client::builder().api_key(&key);
+            if let Some(headers) = extra_headers {
+                b = b.http_headers(headers);
+            }
             if let Some(base_url) = &base_url {
                 b = b.base_url(base_url);
             }
@@ -316,6 +380,9 @@ pub fn create_client(
         ProviderKind::Ollama => {
             let key: ollama::OllamaApiKey = key.as_str().into();
             let mut b = ollama::Client::builder().api_key(key);
+            if let Some(headers) = extra_headers {
+                b = b.http_headers(headers);
+            }
             if let Some(base_url) = &base_url {
                 b = b.base_url(base_url);
             }
@@ -323,6 +390,9 @@ pub fn create_client(
         }
         ProviderKind::OpenRouter => {
             let mut b = openrouter::Client::builder().api_key(&key);
+            if let Some(headers) = extra_headers {
+                b = b.http_headers(headers);
+            }
             if let Some(base_url) = &base_url {
                 b = b.base_url(base_url);
             }
@@ -334,9 +404,12 @@ pub fn create_client(
                     "CUSTOM_BASE_URL environment variable must be set for custom provider"
                 )
             })?;
-            let b = openai::CompletionsClient::builder()
+            let mut b = openai::CompletionsClient::builder()
                 .api_key(&key)
                 .base_url(&base_url);
+            if let Some(headers) = extra_headers {
+                b = b.http_headers(headers);
+            }
             Ok(AnyClient::Custom(b.build()?))
         }
     }

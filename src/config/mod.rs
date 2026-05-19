@@ -11,11 +11,46 @@ use crate::extras::mcp::config::McpServerConfig;
 #[cfg(feature = "acp")]
 use crate::extras::acp::config::AcpServerConfig;
 
+/// A header value that is either a literal string or read from an environment variable.
+///
+/// In `config.json`, use:
+/// - `{ "value": "some-literal" }` for a static value
+/// - `{ "env": "MY_VAR" }` to read from an environment variable at startup
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum HeaderValue {
+    /// A literal header value.
+    Literal { value: String },
+    /// Read the header value from the named environment variable.
+    FromEnv { env: String },
+}
+
+impl HeaderValue {
+    /// Resolve to the concrete string value, or return an error if the env var is unset/empty.
+    pub fn resolve(&self) -> anyhow::Result<String> {
+        match self {
+            HeaderValue::Literal { value } => Ok(value.clone()),
+            HeaderValue::FromEnv { env } => {
+                let val = std::env::var(env).unwrap_or_default();
+                if val.is_empty() {
+                    anyhow::bail!(
+                        "Custom provider header references env var {env:?} which is unset or empty"
+                    );
+                }
+                Ok(val)
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CustomProviderConfig {
     pub provider_type: String,
     pub base_url: String,
     pub api_key_env: Option<String>,
+    /// Arbitrary extra headers to send with every request to this provider.
+    #[serde(default)]
+    pub headers: HashMap<String, HeaderValue>,
 }
 
 #[derive(Debug, Default, Deserialize)]
