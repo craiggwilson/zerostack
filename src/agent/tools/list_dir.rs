@@ -2,10 +2,9 @@ use std::path::Path;
 
 use ignore::WalkBuilder;
 use rig::completion::ToolDefinition;
-use rig::tool::Tool;
 
 use crate::agent::tools::{
-    AskSender, ListDirArgs, PermCheck, ToolError, check_perm_path, is_skip_dir,
+    ContextualTool, ListDirArgs, ToolContext, ToolError, ToolName, is_skip_dir,
 };
 
 fn format_size(bytes: u64) -> String {
@@ -29,23 +28,16 @@ fn count_dir_entries(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-pub struct ListDirTool {
-    pub permission: Option<PermCheck>,
-    pub ask_tx: Option<AskSender>,
-}
+pub struct ListDirTool;
 
-impl ListDirTool {
-    pub fn new(permission: Option<PermCheck>, ask_tx: Option<AskSender>) -> Self {
-        ListDirTool { permission, ask_tx }
-    }
-}
-
-impl Tool for ListDirTool {
-    const NAME: &'static str = "list_dir";
-
-    type Error = ToolError;
+impl ContextualTool for ListDirTool {
     type Args = ListDirArgs;
     type Output = String;
+    type Error = ToolError;
+
+    fn name(&self) -> ToolName {
+        ToolName::list_dir()
+    }
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
@@ -64,9 +56,9 @@ impl Tool for ListDirTool {
         }
     }
 
-    async fn call(&self, args: ListDirArgs) -> Result<String, ToolError> {
+    async fn call(&self, ctx: &ToolContext, args: ListDirArgs) -> Result<String, ToolError> {
         let path = args.path.as_deref().unwrap_or(".");
-        check_perm_path(&self.permission, &self.ask_tx, "list_dir", path).await?;
+        ctx.check_perm_path(&ToolName::list_dir(), path).await?;
 
         let walker = WalkBuilder::new(path)
             .git_ignore(true)

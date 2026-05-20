@@ -1,37 +1,32 @@
+use std::sync::Arc;
+
 use compact_str::CompactString;
 use rig::agent::{Agent, AgentBuilder};
 use rig::completion::CompletionModel;
 use rig::providers::openrouter;
 
 use crate::agent::prompt::{SYSTEM_PROMPT, TODO_TOOLS_PROMPT};
-use crate::agent::toolset::{ToolPreset, ToolSet};
-use crate::agent::tools;
+use crate::agent::tools::ToolContext;
+use crate::agent::toolset::ToolSet;
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::context::ContextFiles;
-#[cfg(feature = "mcp")]
-use crate::extras::mcp::McpClientManager;
-use crate::permission::ask::AskSender;
-use crate::permission::checker::PermCheck;
-use crate::sandbox::Sandbox;
 
 #[allow(dead_code)]
 pub type ZAgent = Agent<openrouter::CompletionModel>;
 
 /// Build an agent with the given model, configuration, and tool set.
 ///
-/// Pass `ToolSet::default()` for the lead agent — this includes all tools,
-/// matching pre-existing behavior. Subagents can pass a restricted `ToolSet`.
+/// The caller is responsible for constructing the appropriate `ToolSet`
+/// (including honouring `--no-tools` and registering MCP tools). This
+/// function trusts the `ToolSet` it receives.
 pub async fn build_agent_inner<M: CompletionModel + 'static>(
     model: M,
     cli: &Cli,
     cfg: &Config,
     context: &ContextFiles,
-    permission: Option<PermCheck>,
-    ask_tx: Option<AskSender>,
-    sandbox: Sandbox,
+    ctx: &Arc<ToolContext>,
     tool_set: &ToolSet,
-    #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
 ) -> Agent<M> {
     let mut preamble = SYSTEM_PROMPT.to_string();
     preamble.push('\n');
@@ -64,87 +59,8 @@ pub async fn build_agent_inner<M: CompletionModel + 'static>(
         builder = builder.temperature(clamped);
     }
 
-    // ToolPreset::None with no force-includes → build without any tools.
-    // Also respect the CLI --no-tools flag for the lead agent (All preset).
-    let no_tools = match tool_set.preset {
-        ToolPreset::None => tool_set.overrides.values().all(|&v| !v),
-        ToolPreset::All => cli.resolve_no_tools(cfg),
-        ToolPreset::ReadOnly => false,
-    };
-
-    if no_tools {
-        builder.build()
-    } else {
-        let all_base: Vec<(&str, Box<dyn rig::tool::ToolDyn>)> = vec![
-            (
-                "read",
-                Box::new(tools::ReadTool::new(permission.clone(), ask_tx.clone())),
-            ),
-            (
-                "write",
-                Box::new(tools::WriteTool::new(permission.clone(), ask_tx.clone())),
-            ),
-            (
-                "edit",
-                Box::new(tools::EditTool::new(permission.clone(), ask_tx.clone())),
-            ),
-            (
-                "bash",
-                Box::new(tools::BashTool::new(
-                    permission.clone(),
-                    ask_tx.clone(),
-                    sandbox.clone(),
-                )),
-            ),
-            (
-                "grep",
-                Box::new(tools::GrepTool::new(permission.clone(), ask_tx.clone())),
-            ),
-            (
-                "find_files",
-                Box::new(tools::FindFilesTool::new(
-                    permission.clone(),
-                    ask_tx.clone(),
-                )),
-            ),
-            (
-                "list_dir",
-                Box::new(tools::ListDirTool::new(permission.clone(), ask_tx.clone())),
-            ),
-            (
-                "write_todo_list",
-                Box::new(tools::WriteTodoList::new(
-                    permission.clone(),
-                    ask_tx.clone(),
-                )),
-            ),
-        ];
-
-        let base_tools: Vec<Box<dyn rig::tool::ToolDyn>> = all_base
-            .into_iter()
-            .filter(|(name, _)| tool_set.includes(name))
-            .map(|(_, tool)| tool)
-            .collect();
-
-        #[allow(unused_mut)]
-        let mut builder = builder.tools(base_tools);
-
-        #[cfg(feature = "mcp")]
-        if let Some(manager) = &mcp_manager {
-            let mcp_tools = manager
-                .collect_tools(permission.clone(), ask_tx.clone())
-                .await;
-            if !mcp_tools.is_empty() {
-                let dyn_tools: Vec<Box<dyn rig::tool::ToolDyn>> = mcp_tools
-                    .into_iter()
-                    .map(|t| Box::new(t) as Box<dyn rig::tool::ToolDyn>)
-                    .collect();
-                builder = builder.tools(dyn_tools);
-            }
-        }
-
-        builder.build()
-    }
+    let tools = tool_set.tools(ctx);
+    builder.tools(tools).build()
 }
 
 #[allow(dead_code)]

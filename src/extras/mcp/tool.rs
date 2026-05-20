@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::fmt;
+use std::sync::Arc;
 
 use rig::completion::ToolDefinition;
 use rig::tool::{ToolDyn, ToolError};
@@ -7,9 +8,7 @@ use rig::wasm_compat::WasmBoxedFuture;
 use rmcp::model::{CallToolRequestParams, JsonObject, RawContent};
 use rmcp::service::{Peer, RoleClient};
 
-use crate::agent::tools::check_perm;
-use crate::permission::ask::AskSender;
-use crate::permission::checker::PermCheck;
+use crate::agent::tools::{ToolContext, ToolName};
 
 #[derive(Debug)]
 pub struct McpToolError(pub String);
@@ -26,8 +25,7 @@ pub struct McpTool {
     pub server_name: String,
     pub definition: rmcp::model::Tool,
     pub peer: Peer<RoleClient>,
-    pub permission: Option<PermCheck>,
-    pub ask_tx: Option<AskSender>,
+    pub ctx: Arc<ToolContext>,
 }
 
 impl ToolDyn for McpTool {
@@ -57,12 +55,11 @@ impl ToolDyn for McpTool {
         let server_name = self.server_name.clone();
         let tool_name = self.definition.name.to_string();
         let peer = self.peer.clone();
-        let permission = self.permission.clone();
-        let ask_tx = self.ask_tx.clone();
+        let ctx = self.ctx.clone();
 
         Box::pin(async move {
             let perm_key = format!("mcp_tool:{server_name}:{tool_name}");
-            check_perm(&permission, &ask_tx, "mcp_tool", &perm_key)
+            ctx.check_perm(&ToolName::from("mcp_tool"), &perm_key)
                 .await
                 .map_err(|e| ToolError::ToolCallError(Box::new(McpToolError(e.to_string()))))?;
 

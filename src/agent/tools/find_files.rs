@@ -1,29 +1,21 @@
 use ignore::WalkBuilder;
 use regex::Regex;
 use rig::completion::ToolDefinition;
-use rig::tool::Tool;
 
 use crate::agent::tools::{
-    AskSender, FindFilesArgs, MAX_FIND_RESULTS, PermCheck, ToolError, check_perm, is_skip_dir,
+    ContextualTool, FindFilesArgs, MAX_FIND_RESULTS, ToolContext, ToolError, ToolName, is_skip_dir,
 };
 
-pub struct FindFilesTool {
-    pub permission: Option<PermCheck>,
-    pub ask_tx: Option<AskSender>,
-}
+pub struct FindFilesTool;
 
-impl FindFilesTool {
-    pub fn new(permission: Option<PermCheck>, ask_tx: Option<AskSender>) -> Self {
-        FindFilesTool { permission, ask_tx }
-    }
-}
-
-impl Tool for FindFilesTool {
-    const NAME: &'static str = "find_files";
-
-    type Error = ToolError;
+impl ContextualTool for FindFilesTool {
     type Args = FindFilesArgs;
     type Output = String;
+    type Error = ToolError;
+
+    fn name(&self) -> ToolName {
+        ToolName::find_files()
+    }
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
@@ -46,8 +38,9 @@ impl Tool for FindFilesTool {
         }
     }
 
-    async fn call(&self, args: FindFilesArgs) -> Result<String, ToolError> {
-        check_perm(&self.permission, &self.ask_tx, "find_files", &args.pattern).await?;
+    async fn call(&self, ctx: &ToolContext, args: FindFilesArgs) -> Result<String, ToolError> {
+        ctx.check_perm(&ToolName::find_files(), &args.pattern)
+            .await?;
 
         let re = Regex::new(&args.pattern)
             .map_err(|e| ToolError::Msg(format!("Invalid regex: {}", e)))?;

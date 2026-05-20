@@ -6,12 +6,13 @@ use agent_client_protocol::on_receive_request;
 use agent_client_protocol::schema::*;
 use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Responder, Stdio};
 
+use crate::agent::tools::ToolContext;
+use crate::agent::toolset::ToolSet;
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::context::ContextFiles;
 use crate::event::AgentEvent;
-use crate::permission::ask::AskSender;
-use crate::permission::checker::{PermCheck, PermissionChecker};
+use crate::permission::checker::PermissionChecker;
 use crate::permission::{PermissionConfig, SecurityMode};
 use crate::sandbox::Sandbox;
 
@@ -153,19 +154,17 @@ async fn run_prompt(
 
     let model = client.completion_model(model_str.to_string());
 
-    let (permission, ask_tx) = build_acp_permission(state);
     let sandbox = Sandbox::new(state.cli.resolve_sandbox(&state.cfg));
+    let tool_ctx = build_acp_context(state, sandbox);
+    let tool_set = ToolSet::default();
 
     let agent = crate::provider::build_agent(
         model,
         &state.cli,
         &state.cfg,
         &state.context,
-        permission,
-        ask_tx,
-        sandbox,
-        #[cfg(feature = "mcp")]
-        None::<&crate::extras::mcp::McpClientManager>,
+        &tool_ctx,
+        &tool_set,
     )
     .await;
 
@@ -231,12 +230,12 @@ async fn run_prompt(
     Ok(())
 }
 
-fn build_acp_permission(state: &AcpState) -> (Option<PermCheck>, Option<AskSender>) {
+fn build_acp_context(state: &AcpState, sandbox: Sandbox) -> Arc<ToolContext> {
     use std::sync::Mutex;
 
     let no_tools = state.cli.resolve_no_tools(&state.cfg);
     if no_tools {
-        return (None, None);
+        return ToolContext::headless(sandbox);
     }
 
     let perm_config: PermissionConfig = state
@@ -248,11 +247,11 @@ fn build_acp_permission(state: &AcpState) -> (Option<PermCheck>, Option<AskSende
 
     let mode = resolve_acp_mode(&state.cli, &state.cfg);
     let checker = PermissionChecker::new(&perm_config, mode, None);
-    let perm: PermCheck = Arc::new(Mutex::new(checker));
+    let perm = Arc::new(Mutex::new(checker));
 
     let (ask_tx, _ask_rx) = tokio::sync::mpsc::channel(64);
 
-    (Some(perm), Some(ask_tx))
+    ToolContext::interactive(Some(perm), Some(ask_tx), sandbox)
 }
 
 fn resolve_acp_mode(cli: &Cli, cfg: &Config) -> SecurityMode {

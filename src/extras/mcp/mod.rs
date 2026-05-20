@@ -3,11 +3,11 @@ pub mod config;
 pub mod tool;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tool::McpTool;
 
-use crate::permission::ask::AskSender;
-use crate::permission::checker::PermCheck;
+use crate::agent::tools::ToolContext;
 
 pub struct McpClientManager {
     pub handles: Vec<client::McpClientHandle>,
@@ -30,11 +30,7 @@ impl McpClientManager {
         Self { handles }
     }
 
-    pub async fn collect_tools(
-        &self,
-        permission: Option<PermCheck>,
-        ask_tx: Option<AskSender>,
-    ) -> Vec<McpTool> {
+    pub async fn collect_tools(&self, ctx: &Arc<ToolContext>) -> Vec<McpTool> {
         let mut all_tools = Vec::new();
         for handle in &self.handles {
             let peer = handle.peer();
@@ -46,8 +42,7 @@ impl McpClientManager {
                             server_name: server_name.clone(),
                             definition,
                             peer: peer.clone(),
-                            permission: permission.clone(),
-                            ask_tx: ask_tx.clone(),
+                            ctx: ctx.clone(),
                         });
                     }
                 }

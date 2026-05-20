@@ -16,6 +16,8 @@ mod tests;
 use clap::Parser;
 use session::MessageRole;
 
+use crate::agent::tools::{ToolContext, ToolName};
+use crate::agent::toolset::ToolSet;
 use crate::permission::ask::AskSender;
 use crate::permission::checker::{PermCheck, PermissionChecker};
 use crate::permission::{PermissionConfig, SecurityMode};
@@ -167,21 +169,31 @@ async fn main() -> anyhow::Result<()> {
             .load_session_allowlist(&allowlist);
     }
 
+    // Build the shared ToolContext and ToolSet.
+    let tool_ctx = ToolContext::interactive(permission.clone(), ask_tx.clone(), sandbox.clone());
+    let mut tool_set = if cli.resolve_no_tools(&cfg) {
+        ToolSet::no_tools()
+    } else {
+        ToolSet::default()
+    };
+
+    // Register MCP tools into the ToolSet so the builder doesn't need to
+    // know about MCP at all.
+    #[cfg(feature = "mcp")]
+    if let Some(manager) = &mcp_manager {
+        let mcp_tools = manager.collect_tools(&tool_ctx).await;
+        for tool in mcp_tools {
+            let name = ToolName::from(tool.definition.name.as_ref());
+            tool_set.register_tool(name, Box::new(tool));
+        }
+    }
+
     let completion_model = client.completion_model(model.to_string());
 
     if cli.print {
-        let agent = provider::build_agent(
-            completion_model,
-            &cli,
-            &cfg,
-            &context,
-            permission,
-            ask_tx,
-            sandbox.clone(),
-            #[cfg(feature = "mcp")]
-            mcp_manager.as_ref(),
-        )
-        .await;
+        let agent =
+            provider::build_agent(completion_model, &cli, &cfg, &context, &tool_ctx, &tool_set)
+                .await;
         let msg = cli.message.join(" ");
         let response = agent
             .run_print(&msg, cli.resolve_max_agent_turns(&cfg))
@@ -195,33 +207,14 @@ async fn main() -> anyhow::Result<()> {
         #[cfg(feature = "loop")]
         if cli.loop_mode {
             let model = client.completion_model(model.to_string());
-            let agent = provider::build_agent(
-                model,
-                &cli,
-                &cfg,
-                &context,
-                permission,
-                ask_tx,
-                sandbox.clone(),
-                #[cfg(feature = "mcp")]
-                mcp_manager.as_ref(),
-            )
-            .await;
+            let agent =
+                provider::build_agent(model, &cli, &cfg, &context, &tool_ctx, &tool_set).await;
             return run_headless_loop(agent, &cli, &cfg, &context).await;
         }
 
-        let agent = provider::build_agent(
-            completion_model,
-            &cli,
-            &cfg,
-            &context,
-            permission.clone(),
-            ask_tx.clone(),
-            sandbox.clone(),
-            #[cfg(feature = "mcp")]
-            mcp_manager.as_ref(),
-        )
-        .await;
+        let agent =
+            provider::build_agent(completion_model, &cli, &cfg, &context, &tool_ctx, &tool_set)
+                .await;
 
         if !cli.resolve_no_tools(&cfg)
             && let Some(perm) = &permission
@@ -243,10 +236,9 @@ async fn main() -> anyhow::Result<()> {
             &cfg,
             &mut session,
             &mut context,
-            permission,
-            ask_tx,
+            tool_ctx,
+            tool_set,
             ask_rx,
-            sandbox,
             #[cfg(feature = "mcp")]
             mcp_manager.as_ref(),
         )

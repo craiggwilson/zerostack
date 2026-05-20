@@ -7,18 +7,17 @@ use rig::completion::{CompletionModel, Message};
 use rig::providers::{anthropic, gemini, ollama, openai, openrouter};
 use rig::streaming::StreamingChat;
 
+use std::sync::Arc;
+
 use crate::agent::builder;
 use crate::agent::prompt;
 use crate::agent::runner::{self, AgentRunner};
+use crate::agent::tools::ToolContext;
 use crate::agent::toolset::ToolSet;
 use crate::cli::Cli;
 use crate::config::{Config, CustomProviderConfig};
 use crate::context::ContextFiles;
-#[cfg(feature = "mcp")]
-use crate::extras::mcp::McpClientManager;
-use crate::permission::ask::AskSender;
-use crate::permission::checker::PermCheck;
-use crate::sandbox::Sandbox;
+
 use crate::session::SessionMessage;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -284,11 +283,7 @@ pub enum AnyAgent {
 }
 
 impl AnyAgent {
-    pub async fn run_print(
-        &self,
-        prompt: &str,
-        max_turns: usize,
-    ) -> anyhow::Result<String> {
+    pub async fn run_print(&self, prompt: &str, max_turns: usize) -> anyhow::Result<String> {
         match self {
             AnyAgent::OpenRouter(a) => runner::run_print(a, prompt, max_turns).await,
             AnyAgent::OpenAI(a) => runner::run_print(a, prompt, max_turns).await,
@@ -344,7 +339,10 @@ pub fn create_client(
     let extra_headers = if info.extra_headers.is_empty() {
         None
     } else {
-        Some(build_header_map(&info.extra_headers, auth_handled_by_headers)?)
+        Some(build_header_map(
+            &info.extra_headers,
+            auth_handled_by_headers,
+        )?)
     };
 
     match info.kind {
@@ -421,61 +419,27 @@ pub async fn build_agent(
     cli: &Cli,
     cfg: &Config,
     context: &ContextFiles,
-    permission: Option<PermCheck>,
-    ask_tx: Option<AskSender>,
-    sandbox: Sandbox,
-    #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
+    ctx: &Arc<ToolContext>,
+    tool_set: &ToolSet,
 ) -> AnyAgent {
-    let tool_set = ToolSet::default();
-
     match model {
         AnyModel::OpenRouter(m) => AnyAgent::OpenRouter(
-            builder::build_agent_inner(
-                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), &tool_set,
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-            )
-            .await,
+            builder::build_agent_inner(m, cli, cfg, context, ctx, tool_set).await,
         ),
-        AnyModel::OpenAI(m) => AnyAgent::OpenAI(
-            builder::build_agent_inner(
-                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), &tool_set,
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-            )
-            .await,
-        ),
+        AnyModel::OpenAI(m) => {
+            AnyAgent::OpenAI(builder::build_agent_inner(m, cli, cfg, context, ctx, tool_set).await)
+        }
         AnyModel::Anthropic(m) => AnyAgent::Anthropic(
-            builder::build_agent_inner(
-                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), &tool_set,
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-            )
-            .await,
+            builder::build_agent_inner(m, cli, cfg, context, ctx, tool_set).await,
         ),
-        AnyModel::Gemini(m) => AnyAgent::Gemini(
-            builder::build_agent_inner(
-                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), &tool_set,
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-            )
-            .await,
-        ),
-        AnyModel::Ollama(m) => AnyAgent::Ollama(
-            builder::build_agent_inner(
-                m, cli, cfg, context, permission, ask_tx, sandbox, &tool_set,
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-            )
-            .await,
-        ),
-        AnyModel::Custom(m) => AnyAgent::Custom(
-            builder::build_agent_inner(
-                m, cli, cfg, context, permission, ask_tx, sandbox.clone(), &tool_set,
-                #[cfg(feature = "mcp")]
-                mcp_manager,
-            )
-            .await,
-        ),
+        AnyModel::Gemini(m) => {
+            AnyAgent::Gemini(builder::build_agent_inner(m, cli, cfg, context, ctx, tool_set).await)
+        }
+        AnyModel::Ollama(m) => {
+            AnyAgent::Ollama(builder::build_agent_inner(m, cli, cfg, context, ctx, tool_set).await)
+        }
+        AnyModel::Custom(m) => {
+            AnyAgent::Custom(builder::build_agent_inner(m, cli, cfg, context, ctx, tool_set).await)
+        }
     }
 }

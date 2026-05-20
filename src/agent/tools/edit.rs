@@ -1,18 +1,10 @@
 use rig::completion::ToolDefinition;
-use rig::tool::Tool;
 
-use crate::agent::tools::{AskSender, EditArgs, PermCheck, ToolError, check_perm_path};
+use crate::agent::tools::{ContextualTool, EditArgs, ToolContext, ToolError, ToolName};
 
-pub struct EditTool {
-    pub permission: Option<PermCheck>,
-    pub ask_tx: Option<AskSender>,
-}
+pub struct EditTool;
 
 impl EditTool {
-    pub fn new(permission: Option<PermCheck>, ask_tx: Option<AskSender>) -> Self {
-        EditTool { permission, ask_tx }
-    }
-
     pub(crate) fn show_diff(
         path: &str,
         content: &str,
@@ -63,12 +55,14 @@ impl EditTool {
     }
 }
 
-impl Tool for EditTool {
-    const NAME: &'static str = "edit";
-
-    type Error = ToolError;
+impl ContextualTool for EditTool {
     type Args = EditArgs;
     type Output = String;
+    type Error = ToolError;
+
+    fn name(&self) -> ToolName {
+        ToolName::edit()
+    }
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
@@ -87,14 +81,14 @@ impl Tool for EditTool {
         }
     }
 
-    async fn call(&self, args: EditArgs) -> Result<String, ToolError> {
+    async fn call(&self, ctx: &ToolContext, args: EditArgs) -> Result<String, ToolError> {
         if args.old_text.is_empty() {
             return Err(ToolError::Msg(
                 "old_text must not be empty. Provide the exact text to replace.".to_string(),
             ));
         }
 
-        check_perm_path(&self.permission, &self.ask_tx, "edit", &args.path).await?;
+        ctx.check_perm_path(&ToolName::edit(), &args.path).await?;
 
         let bytes = tokio::fs::read(&args.path).await?;
         let has_crlf = bytes.windows(2).any(|w| w == b"\r\n");

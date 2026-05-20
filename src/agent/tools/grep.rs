@@ -1,22 +1,14 @@
 use ignore::WalkBuilder;
 use regex::Regex;
 use rig::completion::ToolDefinition;
-use rig::tool::Tool;
 
 use crate::agent::tools::{
-    AskSender, GrepArgs, MAX_GREP_RESULTS, PermCheck, ToolError, check_perm, is_skip_dir,
+    ContextualTool, GrepArgs, MAX_GREP_RESULTS, ToolContext, ToolError, ToolName, is_skip_dir,
 };
 
-pub struct GrepTool {
-    pub permission: Option<PermCheck>,
-    pub ask_tx: Option<AskSender>,
-}
+pub struct GrepTool;
 
 impl GrepTool {
-    pub fn new(permission: Option<PermCheck>, ask_tx: Option<AskSender>) -> Self {
-        GrepTool { permission, ask_tx }
-    }
-
     fn glob_to_regex(glob: &str) -> String {
         let mut re = String::with_capacity(glob.len() * 2);
         for c in glob.chars() {
@@ -38,12 +30,14 @@ impl GrepTool {
     }
 }
 
-impl Tool for GrepTool {
-    const NAME: &'static str = "grep";
-
-    type Error = ToolError;
+impl ContextualTool for GrepTool {
     type Args = GrepArgs;
     type Output = String;
+    type Error = ToolError;
+
+    fn name(&self) -> ToolName {
+        ToolName::grep()
+    }
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
@@ -74,8 +68,8 @@ impl Tool for GrepTool {
         }
     }
 
-    async fn call(&self, args: GrepArgs) -> Result<String, ToolError> {
-        check_perm(&self.permission, &self.ask_tx, "grep", &args.pattern).await?;
+    async fn call(&self, ctx: &ToolContext, args: GrepArgs) -> Result<String, ToolError> {
+        ctx.check_perm(&ToolName::grep(), &args.pattern).await?;
 
         let re = Regex::new(&args.pattern)
             .map_err(|e| ToolError::Msg(format!("Invalid regex pattern: {}", e)))?;

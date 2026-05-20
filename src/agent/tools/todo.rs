@@ -1,8 +1,7 @@
 use rig::completion::ToolDefinition;
-use rig::tool::Tool;
 use serde::{Deserialize, Serialize};
 
-use crate::agent::tools::{AskSender, PermCheck, ToolError, check_perm};
+use crate::agent::tools::{ContextualTool, ToolContext, ToolError, ToolName};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct TodoItem {
@@ -18,23 +17,16 @@ pub struct TodoWriteArgs {
 
 pub static TODO_LIST: std::sync::Mutex<Vec<TodoItem>> = std::sync::Mutex::new(Vec::new());
 
-pub struct WriteTodoList {
-    pub permission: Option<PermCheck>,
-    pub ask_tx: Option<AskSender>,
-}
+pub struct WriteTodoList;
 
-impl WriteTodoList {
-    pub fn new(permission: Option<PermCheck>, ask_tx: Option<AskSender>) -> Self {
-        WriteTodoList { permission, ask_tx }
-    }
-}
-
-impl Tool for WriteTodoList {
-    const NAME: &'static str = "write_todo_list";
-
-    type Error = ToolError;
+impl ContextualTool for WriteTodoList {
     type Args = TodoWriteArgs;
     type Output = String;
+    type Error = ToolError;
+
+    fn name(&self) -> ToolName {
+        ToolName::write_todo_list()
+    }
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
@@ -62,8 +54,8 @@ impl Tool for WriteTodoList {
         }
     }
 
-    async fn call(&self, args: TodoWriteArgs) -> Result<String, ToolError> {
-        check_perm(&self.permission, &self.ask_tx, "write_todo_list", "").await?;
+    async fn call(&self, ctx: &ToolContext, args: TodoWriteArgs) -> Result<String, ToolError> {
+        ctx.check_perm(&ToolName::write_todo_list(), "").await?;
 
         let mut list = TODO_LIST.lock().unwrap_or_else(|e| e.into_inner());
         *list = args.todos;

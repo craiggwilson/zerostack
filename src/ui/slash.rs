@@ -1,17 +1,18 @@
+use std::sync::Arc;
+
 use compact_str::CompactString;
 use crossterm::style::Color;
 use smallvec::SmallVec;
 
+use crate::agent::tools::ToolContext;
+use crate::agent::toolset::ToolSet;
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::context::ContextFiles;
 #[cfg(feature = "mcp")]
 use crate::extras::mcp::McpClientManager;
 use crate::permission::SecurityMode;
-use crate::permission::ask::AskSender;
-use crate::permission::checker::PermCheck;
 use crate::provider::{AnyAgent, AnyClient};
-use crate::sandbox::Sandbox;
 use crate::session::{MessageRole, Session};
 use crate::ui::events::{format_time, render_session};
 use crate::ui::input::InputEditor;
@@ -55,10 +56,8 @@ pub async fn handle_compress(
     cli: &Cli,
     cfg: &Config,
     context: &mut ContextFiles,
-    permission: &Option<PermCheck>,
-    ask_tx: &Option<AskSender>,
-    sandbox: &Sandbox,
-    #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
+    ctx: &Arc<ToolContext>,
+    tool_set: &ToolSet,
 ) -> anyhow::Result<()> {
     renderer.write_line("compressing...", C_AGENT)?;
     renderer.write_line("", Color::White)?;
@@ -107,18 +106,7 @@ pub async fn handle_compress(
     session.compress(summary, cut_idx, tokens_before);
 
     let model = client.completion_model(session.model.to_string());
-    *agent = crate::provider::build_agent(
-        model,
-        cli,
-        cfg,
-        context,
-        permission.clone(),
-        ask_tx.clone(),
-        sandbox.clone(),
-        #[cfg(feature = "mcp")]
-        mcp_manager,
-    )
-    .await;
+    *agent = crate::provider::build_agent(model, cli, cfg, context, ctx, tool_set).await;
     renderer.write_line("prompt cleared (back to default behavior)", C_AGENT)?;
 
     render_session(renderer, session, cli, cfg, context)?;
@@ -146,13 +134,13 @@ pub async fn handle_slash(
     show_reasoning: &mut bool,
     is_running: &mut bool,
     input: &mut InputEditor,
-    permission: &Option<PermCheck>,
-    ask_tx: &Option<AskSender>,
+    ctx: &Arc<ToolContext>,
+    tool_set: &ToolSet,
     todo_tools_enabled: &mut bool,
-    sandbox: &Sandbox,
     #[cfg(feature = "loop")] loop_state: &mut Option<crate::extras::r#loop::LoopState>,
     #[cfg(feature = "mcp")] mcp_manager: Option<&McpClientManager>,
 ) -> anyhow::Result<()> {
+    let permission = &ctx.permission;
     let parts: SmallVec<[&str; 3]> = text.trim().splitn(3, ' ').collect();
     match parts[0] {
         "/model" => {
@@ -161,18 +149,8 @@ pub async fn handle_slash(
             } else {
                 let new_model = CompactString::new(parts[1].trim());
                 let model = client.completion_model(new_model.to_string());
-                *agent = crate::provider::build_agent(
-                    model,
-                    cli,
-                    cfg,
-                    context,
-                    permission.clone(),
-                    ask_tx.clone(),
-                    sandbox.clone(),
-                    #[cfg(feature = "mcp")]
-                    mcp_manager,
-                )
-                .await;
+                *agent =
+                    crate::provider::build_agent(model, cli, cfg, context, ctx, tool_set).await;
                 session.model = new_model.clone();
                 session.provider = cli.resolve_provider(cfg);
                 renderer.write_line(&format!("switched to model: {}", new_model), C_AGENT)?;
@@ -474,18 +452,8 @@ pub async fn handle_slash(
                 } else {
                     *todo_tools_enabled = new_state;
                     let model = client.completion_model(session.model.to_string());
-                    *agent = crate::provider::build_agent(
-                        model,
-                        cli,
-                        cfg,
-                        context,
-                        permission.clone(),
-                        ask_tx.clone(),
-                        sandbox.clone(),
-                        #[cfg(feature = "mcp")]
-                        mcp_manager,
-                    )
-                    .await;
+                    *agent =
+                        crate::provider::build_agent(model, cli, cfg, context, ctx, tool_set).await;
                     renderer.write_line(
                         &format!(
                             "todo tools: {}",
@@ -579,18 +547,8 @@ pub async fn handle_slash(
                     context.current_prompt = None;
                     context.current_prompt_name = None;
                     let model = client.completion_model(session.model.to_string());
-                    *agent = crate::provider::build_agent(
-                        model,
-                        cli,
-                        cfg,
-                        context,
-                        permission.clone(),
-                        ask_tx.clone(),
-                        sandbox.clone(),
-                        #[cfg(feature = "mcp")]
-                        mcp_manager,
-                    )
-                    .await;
+                    *agent =
+                        crate::provider::build_agent(model, cli, cfg, context, ctx, tool_set).await;
                 }
             } else {
                 let name = parts[1].trim();
@@ -598,18 +556,8 @@ pub async fn handle_slash(
                     context.current_prompt = Some(content.clone());
                     context.current_prompt_name = Some(name.to_string());
                     let model = client.completion_model(session.model.to_string());
-                    *agent = crate::provider::build_agent(
-                        model,
-                        cli,
-                        cfg,
-                        context,
-                        permission.clone(),
-                        ask_tx.clone(),
-                        sandbox.clone(),
-                        #[cfg(feature = "mcp")]
-                        mcp_manager,
-                    )
-                    .await;
+                    *agent =
+                        crate::provider::build_agent(model, cli, cfg, context, ctx, tool_set).await;
                     renderer.write_line(&format!("active prompt: {}", name), C_AGENT)?;
                 } else {
                     renderer.write_line(&format!("unknown prompt: '{}'", name), C_ERROR)?;
@@ -644,18 +592,8 @@ pub async fn handle_slash(
                     session.working_dir = compact_str::CompactString::new(path.to_string_lossy());
                     context.reload();
                     let model = client.completion_model(session.model.to_string());
-                    *agent = crate::provider::build_agent(
-                        model,
-                        cli,
-                        cfg,
-                        context,
-                        permission.clone(),
-                        ask_tx.clone(),
-                        sandbox.clone(),
-                        #[cfg(feature = "mcp")]
-                        mcp_manager,
-                    )
-                    .await;
+                    *agent =
+                        crate::provider::build_agent(model, cli, cfg, context, ctx, tool_set).await;
                     render_session(renderer, session, cli, cfg, context)?;
                     renderer.write_line(
                         &format!("worktree created: branch '{}' at {}", name, path.display()),

@@ -1,27 +1,19 @@
 use std::path::Path;
 
 use rig::completion::ToolDefinition;
-use rig::tool::Tool;
 
-use crate::agent::tools::{AskSender, PermCheck, ToolError, WriteArgs, check_perm_path};
+use crate::agent::tools::{ContextualTool, ToolContext, ToolError, ToolName, WriteArgs};
 
-pub struct WriteTool {
-    pub permission: Option<PermCheck>,
-    pub ask_tx: Option<AskSender>,
-}
+pub struct WriteTool;
 
-impl WriteTool {
-    pub fn new(permission: Option<PermCheck>, ask_tx: Option<AskSender>) -> Self {
-        WriteTool { permission, ask_tx }
-    }
-}
-
-impl Tool for WriteTool {
-    const NAME: &'static str = "write";
-
-    type Error = ToolError;
+impl ContextualTool for WriteTool {
     type Args = WriteArgs;
     type Output = String;
+    type Error = ToolError;
+
+    fn name(&self) -> ToolName {
+        ToolName::write()
+    }
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
@@ -38,8 +30,8 @@ impl Tool for WriteTool {
         }
     }
 
-    async fn call(&self, args: WriteArgs) -> Result<String, ToolError> {
-        check_perm_path(&self.permission, &self.ask_tx, "write", &args.path).await?;
+    async fn call(&self, ctx: &ToolContext, args: WriteArgs) -> Result<String, ToolError> {
+        ctx.check_perm_path(&ToolName::write(), &args.path).await?;
 
         let path = Path::new(&args.path);
         if let Some(parent) = path.parent() {

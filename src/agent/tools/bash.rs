@@ -1,32 +1,18 @@
 use rig::completion::ToolDefinition;
-use rig::tool::Tool;
 use tokio::time::{Duration, timeout};
 
-use crate::agent::tools::{AskSender, BashArgs, PermCheck, ToolError, check_perm};
-use crate::sandbox::Sandbox;
+use crate::agent::tools::{BashArgs, ContextualTool, ToolContext, ToolError, ToolName};
 
-pub struct BashTool {
-    pub permission: Option<PermCheck>,
-    pub ask_tx: Option<AskSender>,
-    pub sandbox: Sandbox,
-}
+pub struct BashTool;
 
-impl BashTool {
-    pub fn new(permission: Option<PermCheck>, ask_tx: Option<AskSender>, sandbox: Sandbox) -> Self {
-        BashTool {
-            permission,
-            ask_tx,
-            sandbox,
-        }
-    }
-}
-
-impl Tool for BashTool {
-    const NAME: &'static str = "bash";
-
-    type Error = ToolError;
+impl ContextualTool for BashTool {
     type Args = BashArgs;
     type Output = String;
+    type Error = ToolError;
+
+    fn name(&self) -> ToolName {
+        ToolName::bash()
+    }
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
@@ -43,18 +29,18 @@ impl Tool for BashTool {
         }
     }
 
-    async fn call(&self, args: BashArgs) -> Result<String, ToolError> {
-        check_perm(&self.permission, &self.ask_tx, "bash", &args.command).await?;
+    async fn call(&self, ctx: &ToolContext, args: BashArgs) -> Result<String, ToolError> {
+        ctx.check_perm(&ToolName::bash(), &args.command).await?;
 
         let output = if let Some(secs) = args.timeout {
             timeout(
                 Duration::from_secs(secs),
-                self.sandbox.wrap_command(&args.command).output(),
+                ctx.sandbox.wrap_command(&args.command).output(),
             )
             .await
             .map_err(|_| ToolError::Msg("Command timed out".to_string()))?
         } else {
-            self.sandbox.wrap_command(&args.command).output().await
+            ctx.sandbox.wrap_command(&args.command).output().await
         }?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
